@@ -17,6 +17,7 @@ from open_webui.utils.tools import (
     set_tool_servers,
     set_terminal_servers,
 )
+from open_webui.utils.runtime_registry import get_runtime_service_records
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.models.oauth_sessions import OAuthSessions
 
@@ -243,6 +244,24 @@ class TerminalServerConnection(BaseModel):
 
 class TerminalServersConfigForm(BaseModel):
     TERMINAL_SERVER_CONNECTIONS: list[TerminalServerConnection]
+
+
+@router.get('/runtime_registry')
+async def get_runtime_registry_config(
+    request: Request,
+    service_type: Optional[str] = None,
+    include_unhealthy: bool = False,
+    freshness_seconds: Optional[int] = None,
+    user=Depends(get_admin_user),
+):
+    return {
+        'RUNTIME_SERVICE_REGISTRY': get_runtime_service_records(
+            request.app,
+            service_type=service_type,
+            require_healthy=not include_unhealthy,
+            freshness_seconds=freshness_seconds,
+        ),
+    }
 
 
 @router.get('/terminal_servers')
