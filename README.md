@@ -174,6 +174,16 @@ We offer various installation alternatives, including non-Docker native installa
 
 Look at the [Local Development Guide](https://docs.openwebui.com/getting-started/development) for instructions on setting up a local development environment.
 
+### Optional NATS Overlay
+
+If you want to enable the internal NATS control-plane hooks without changing the base stack, start Compose with the optional overlay:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.nats.yaml up -d
+```
+
+This adds a local NATS server with JetStream enabled and sets `NATS_URL=nats://nats:4222` for the `open-webui` service. If you do not include the overlay, Open WebUI keeps the existing Redis/local-only behavior.
+
 ### Troubleshooting
 
 Encountering connection issues? Our [Open WebUI Documentation](https://docs.openwebui.com/troubleshooting/) has got you covered. For further assistance and to join our vibrant community, visit the [Open WebUI Discord](https://discord.gg/5rJgQTnV4s).

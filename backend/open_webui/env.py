@@ -438,6 +438,23 @@ else:
         REDIS_RECONNECT_DELAY = None
 
 ####################################
+# NATS
+####################################
+
+NATS_URL = os.environ.get('NATS_URL', '')
+NATS_NAME = os.environ.get('NATS_NAME', 'open-webui')
+
+NATS_CONNECT_TIMEOUT = os.environ.get('NATS_CONNECT_TIMEOUT', '2')
+try:
+    NATS_CONNECT_TIMEOUT = float(NATS_CONNECT_TIMEOUT)
+except ValueError:
+    NATS_CONNECT_TIMEOUT = 2.0
+
+RETRIEVAL_TRANSPORT = os.environ.get('RETRIEVAL_TRANSPORT', 'local').strip().lower()
+if RETRIEVAL_TRANSPORT not in {'local', 'jetstream'}:
+    RETRIEVAL_TRANSPORT = 'local'
+
+####################################
 # UVICORN WORKERS
 ####################################
 
@@ -505,6 +522,8 @@ WEBUI_SECRET_KEY = os.environ.get(
     'WEBUI_SECRET_KEY',
     os.environ.get('WEBUI_JWT_SECRET_KEY', 't0p-s3cr3t'),  # DEPRECATED: remove at next major version
 )
+
+TASK_COMMAND_SIGNING_SECRET = os.environ.get('TASK_COMMAND_SIGNING_SECRET', '').strip() or WEBUI_SECRET_KEY
 
 WEBUI_SESSION_COOKIE_SAME_SITE = os.environ.get('WEBUI_SESSION_COOKIE_SAME_SITE', 'lax')
 

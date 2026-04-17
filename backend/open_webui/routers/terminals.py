@@ -7,6 +7,7 @@ Routes:
 
 import logging
 import posixpath
+import json
 from urllib.parse import unquote
 
 import aiohttp
@@ -18,6 +19,14 @@ from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_connection_access
 from open_webui.models.groups import Groups
 from open_webui.models.users import Users
+from open_webui.utils.task_messaging import (
+    TERMINAL_SESSION_ATTACHED_SUBJECT,
+    TERMINAL_SESSION_CREATED_SUBJECT,
+    TERMINAL_SESSION_DISCONNECTED_SUBJECT,
+    TERMINAL_SESSION_FAILED_SUBJECT,
+    build_domain_event,
+    publish_app_event,
+)
 
 log = logging.getLogger(__name__)
 
@@ -166,6 +175,31 @@ async def proxy_terminal(
         await upstream_response.release()
         await session.close()
 
+        if status_code < 400:
+            if request.method == 'POST' and safe_path == 'api/terminals':
+                session_payload = {}
+                if 'application/json' in upstream_content_type:
+                    try:
+                        session_payload = json.loads(response_body.decode('utf-8'))
+                    except Exception:
+                        session_payload = {}
+
+                session_id = str(session_payload.get('name') or session_payload.get('id') or '')
+                if session_id:
+                    await publish_app_event(
+                        TERMINAL_SESSION_CREATED_SUBJECT,
+                        build_domain_event(
+                            event_type='terminal.session.created',
+                            resource_type='terminal_session',
+                            resource_id=session_id,
+                            data={
+                                'session_id': session_id,
+                                'server_id': server_id,
+                                'status': 'created',
+                            },
+                        ),
+                    )
+
         return Response(content=response_body, status_code=status_code, headers=filtered_headers)
 
     except Exception as error:
@@ -190,7 +224,7 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
     """
     import asyncio
     import json
-    from open_webui.utils.auth import decode_token
+    from open_webui.utils.auth import decode_token, is_valid_token
 
     # First-message authentication
     try:
@@ -202,6 +236,9 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
         token = payload.get('token', '')
         data = decode_token(token)
         if data is None or 'id' not in data:
+            await ws.close(code=4001, reason='Invalid token')
+            return None
+        if data.get('jti') and not await is_valid_token(ws, data):
             await ws.close(code=4001, reason='Invalid token')
             return None
         user = Users.get_user_by_id(data['id'])
@@ -274,6 +311,7 @@ async def ws_terminal(
         upstream_url += f'?{urllib.parse.urlencode(upstream_params)}'
 
     session = aiohttp.ClientSession()
+    attached = False
     try:
         async with session.ws_connect(upstream_url) as upstream:
             import asyncio
@@ -301,11 +339,42 @@ async def ws_terminal(
 
             async def _upstream_to_client():
                 """Forward upstream → client."""
+                nonlocal attached
                 try:
                     async for msg in upstream:
                         if msg.type == aiohttp.WSMsgType.BINARY:
+                            if not attached:
+                                await publish_app_event(
+                                    TERMINAL_SESSION_ATTACHED_SUBJECT,
+                                    build_domain_event(
+                                        event_type='terminal.session.attached',
+                                        resource_type='terminal_session',
+                                        resource_id=session_id,
+                                        data={
+                                            'session_id': session_id,
+                                            'server_id': server_id,
+                                            'status': 'attached',
+                                        },
+                                    ),
+                                )
+                                attached = True
                             await ws.send_bytes(msg.data)
                         elif msg.type == aiohttp.WSMsgType.TEXT:
+                            if not attached:
+                                await publish_app_event(
+                                    TERMINAL_SESSION_ATTACHED_SUBJECT,
+                                    build_domain_event(
+                                        event_type='terminal.session.attached',
+                                        resource_type='terminal_session',
+                                        resource_id=session_id,
+                                        data={
+                                            'session_id': session_id,
+                                            'server_id': server_id,
+                                            'status': 'attached',
+                                        },
+                                    ),
+                                )
+                                attached = True
                             await ws.send_text(msg.data)
                         elif msg.type in (
                             aiohttp.WSMsgType.CLOSE,
@@ -321,9 +390,37 @@ async def ws_terminal(
                 return_exceptions=True,
             )
     except Exception as e:
+        await publish_app_event(
+            TERMINAL_SESSION_FAILED_SUBJECT,
+            build_domain_event(
+                event_type='terminal.session.failed',
+                resource_type='terminal_session',
+                resource_id=session_id,
+                data={
+                    'session_id': session_id,
+                    'server_id': server_id,
+                    'status': 'failed',
+                    'error_code': 'terminal_proxy_failed',
+                },
+            ),
+        )
         log.exception('Terminal WebSocket proxy error: %s', e)
     finally:
         await session.close()
+        if attached:
+            await publish_app_event(
+                TERMINAL_SESSION_DISCONNECTED_SUBJECT,
+                build_domain_event(
+                    event_type='terminal.session.disconnected',
+                    resource_type='terminal_session',
+                    resource_id=session_id,
+                    data={
+                        'session_id': session_id,
+                        'server_id': server_id,
+                        'status': 'disconnected',
+                    },
+                ),
+            )
         try:
             await ws.close()
         except Exception:

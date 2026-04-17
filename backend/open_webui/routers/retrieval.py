@@ -97,6 +97,15 @@ from open_webui.utils.misc import (
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_permission
+from open_webui.utils.retrieval_service import RetrievalServiceError, process_file as process_file_service
+from open_webui.utils.retrieval_jobs import build_retrieval_job, build_retrieval_job_record
+from open_webui.utils.task_messaging import (
+    RETRIEVAL_JOB_COMPLETED_SUBJECT,
+    RETRIEVAL_JOB_FAILED_SUBJECT,
+    RETRIEVAL_JOB_STARTED_SUBJECT,
+    build_domain_event,
+    publish_app_event_sync,
+)
 
 from open_webui.config import (
     ENV,
@@ -1523,6 +1532,7 @@ class ProcessFileForm(BaseModel):
     file_id: str
     content: Optional[str] = None
     collection_name: Optional[str] = None
+    job_id: Optional[str] = None
 
 
 @router.post('/process/file')
@@ -1538,234 +1548,51 @@ def process_file(
     Note: granular session management is used to prevent connection pool exhaustion.
     The session is committed before external API calls, and updates use a fresh session.
     """
-    if user.role == 'admin':
-        file = Files.get_file_by_id(form_data.file_id, db=db)
-    else:
-        file = Files.get_file_by_id_and_user_id(form_data.file_id, user.id, db=db)
+    try:
+        return process_file_service(
+            request,
+            form_data,
+            user=user,
+            db=db,
+        )
+    except RetrievalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
 
-    if file:
-        try:
-            collection_name = form_data.collection_name
 
-            if collection_name is None:
-                collection_name = f'file-{file.id}'
+def _resolve_retrieval_job(file: FileModel, actor_id: str, collection_name: str, form_data: ProcessFileForm) -> dict:
+    existing_job = file.data.get('retrieval_job') if file.data else None
+    if existing_job and existing_job.get('job_id') == form_data.job_id:
+        return build_retrieval_job(
+            actor_id=actor_id,
+            resource_id=file.id,
+            job_id=existing_job['job_id'],
+            requested_at=existing_job.get('requested_at'),
+            payload_version=existing_job.get('payload_version', 'v1'),
+            payload={
+                'command_type': 'process_file',
+                'file_id': file.id,
+                'source': 'process_file',
+                'processing_mode': 'inline',
+                'content_type': file.meta.get('content_type') if file.meta else None,
+                'collection_name': collection_name,
+                'content_supplied': bool(form_data.content),
+                **({'inline_content': form_data.content} if form_data.content else {}),
+            },
+        )
 
-            if form_data.content:
-                # Update the content in the file
-                # Usage: /files/{file_id}/data/content/update, /files/ (audio file upload pipeline)
-
-                try:
-                    # /files/{file_id}/data/content/update
-                    VECTOR_DB_CLIENT.delete_collection(collection_name=f'file-{file.id}')
-                except Exception:
-                    # Audio file upload pipeline
-                    pass
-
-                docs = [
-                    Document(
-                        page_content=form_data.content.replace('<br/>', '\n'),
-                        metadata={
-                            **file.meta,
-                            'name': file.filename,
-                            'created_by': file.user_id,
-                            'file_id': file.id,
-                            'source': file.filename,
-                        },
-                    )
-                ]
-
-                text_content = form_data.content
-            elif form_data.collection_name:
-                # Check if the file has already been processed and save the content
-                # Usage: /knowledge/{id}/file/add, /knowledge/{id}/file/update
-
-                result = VECTOR_DB_CLIENT.query(collection_name=f'file-{file.id}', filter={'file_id': file.id})
-
-                if result is not None and len(result.ids[0]) > 0:
-                    docs = [
-                        Document(
-                            page_content=result.documents[0][idx],
-                            metadata=result.metadatas[0][idx],
-                        )
-                        for idx, id in enumerate(result.ids[0])
-                    ]
-                else:
-                    docs = [
-                        Document(
-                            page_content=file.data.get('content', ''),
-                            metadata={
-                                **file.meta,
-                                'name': file.filename,
-                                'created_by': file.user_id,
-                                'file_id': file.id,
-                                'source': file.filename,
-                            },
-                        )
-                    ]
-
-                text_content = file.data.get('content', '')
-            else:
-                # Process the file and save the content
-                # Usage: /files/
-                file_path = file.path
-                if file_path:
-                    file_path = Storage.get_file(file_path)
-                    loader = Loader(
-                        engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
-                        user=user,
-                        DATALAB_MARKER_API_KEY=request.app.state.config.DATALAB_MARKER_API_KEY,
-                        DATALAB_MARKER_API_BASE_URL=request.app.state.config.DATALAB_MARKER_API_BASE_URL,
-                        DATALAB_MARKER_ADDITIONAL_CONFIG=request.app.state.config.DATALAB_MARKER_ADDITIONAL_CONFIG,
-                        DATALAB_MARKER_SKIP_CACHE=request.app.state.config.DATALAB_MARKER_SKIP_CACHE,
-                        DATALAB_MARKER_FORCE_OCR=request.app.state.config.DATALAB_MARKER_FORCE_OCR,
-                        DATALAB_MARKER_PAGINATE=request.app.state.config.DATALAB_MARKER_PAGINATE,
-                        DATALAB_MARKER_STRIP_EXISTING_OCR=request.app.state.config.DATALAB_MARKER_STRIP_EXISTING_OCR,
-                        DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION=request.app.state.config.DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION,
-                        DATALAB_MARKER_FORMAT_LINES=request.app.state.config.DATALAB_MARKER_FORMAT_LINES,
-                        DATALAB_MARKER_USE_LLM=request.app.state.config.DATALAB_MARKER_USE_LLM,
-                        DATALAB_MARKER_OUTPUT_FORMAT=request.app.state.config.DATALAB_MARKER_OUTPUT_FORMAT,
-                        EXTERNAL_DOCUMENT_LOADER_URL=request.app.state.config.EXTERNAL_DOCUMENT_LOADER_URL,
-                        EXTERNAL_DOCUMENT_LOADER_API_KEY=request.app.state.config.EXTERNAL_DOCUMENT_LOADER_API_KEY,
-                        TIKA_SERVER_URL=request.app.state.config.TIKA_SERVER_URL,
-                        DOCLING_SERVER_URL=request.app.state.config.DOCLING_SERVER_URL,
-                        DOCLING_API_KEY=request.app.state.config.DOCLING_API_KEY,
-                        DOCLING_PARAMS=request.app.state.config.DOCLING_PARAMS,
-                        PDF_EXTRACT_IMAGES=request.app.state.config.PDF_EXTRACT_IMAGES,
-                        PDF_LOADER_MODE=request.app.state.config.PDF_LOADER_MODE,
-                        DOCUMENT_INTELLIGENCE_ENDPOINT=request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT,
-                        DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
-                        DOCUMENT_INTELLIGENCE_MODEL=request.app.state.config.DOCUMENT_INTELLIGENCE_MODEL,
-                        MISTRAL_OCR_API_BASE_URL=request.app.state.config.MISTRAL_OCR_API_BASE_URL,
-                        MISTRAL_OCR_API_KEY=request.app.state.config.MISTRAL_OCR_API_KEY,
-                        MINERU_API_MODE=request.app.state.config.MINERU_API_MODE,
-                        MINERU_API_URL=request.app.state.config.MINERU_API_URL,
-                        MINERU_API_KEY=request.app.state.config.MINERU_API_KEY,
-                        MINERU_API_TIMEOUT=request.app.state.config.MINERU_API_TIMEOUT,
-                        MINERU_PARAMS=request.app.state.config.MINERU_PARAMS,
-                    )
-                    docs = loader.load(file.filename, file.meta.get('content_type'), file_path)
-
-                    docs = [
-                        Document(
-                            page_content=doc.page_content,
-                            metadata={
-                                **filter_metadata(doc.metadata),
-                                'name': file.filename,
-                                'created_by': file.user_id,
-                                'file_id': file.id,
-                                'source': file.filename,
-                            },
-                        )
-                        for doc in docs
-                    ]
-                else:
-                    docs = [
-                        Document(
-                            page_content=file.data.get('content', ''),
-                            metadata={
-                                **file.meta,
-                                'name': file.filename,
-                                'created_by': file.user_id,
-                                'file_id': file.id,
-                                'source': file.filename,
-                            },
-                        )
-                    ]
-                text_content = ' '.join([doc.page_content for doc in docs])
-
-            log.debug(f'text_content: {text_content}')
-            Files.update_file_data_by_id(
-                file.id,
-                {'content': text_content},
-                db=db,
-            )
-            hash = calculate_sha256_string(text_content)
-
-            if request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
-                Files.update_file_data_by_id(file.id, {'status': 'completed'}, db=db)
-                Files.update_file_hash_by_id(file.id, hash, db=db)
-                return {
-                    'status': True,
-                    'collection_name': None,
-                    'filename': file.filename,
-                    'content': text_content,
-                }
-            else:
-                try:
-                    # Commit any pending changes before the slow embedding step.
-                    # Note: file is already a Pydantic model (not ORM), so no expunge needed.
-                    db.commit()
-
-                    # External embedding API takes time (5-60s+).
-                    # Subsequent updates use fresh sessions via get_db().
-                    result = save_docs_to_vector_db(
-                        request,
-                        docs=docs,
-                        collection_name=collection_name,
-                        metadata={
-                            'file_id': file.id,
-                            'name': file.filename,
-                            'hash': hash,
-                        },
-                        add=(True if form_data.collection_name else False),
-                        user=user,
-                    )
-                    log.info(f'added {len(docs)} items to collection {collection_name}')
-
-                    if result:
-                        # Fresh session for the final update.
-                        with get_db() as session:
-                            Files.update_file_metadata_by_id(
-                                file.id,
-                                {
-                                    'collection_name': collection_name,
-                                },
-                                db=session,
-                            )
-
-                            Files.update_file_data_by_id(
-                                file.id,
-                                {'status': 'completed'},
-                                db=session,
-                            )
-                            Files.update_file_hash_by_id(file.id, hash, db=session)
-
-                            return {
-                                'status': True,
-                                'collection_name': collection_name,
-                                'filename': file.filename,
-                                'content': text_content,
-                            }
-                    else:
-                        raise Exception('Error saving document to vector database')
-                except Exception as e:
-                    raise e
-
-        except Exception as e:
-            log.exception(e)
-            # Fresh session for error status update.
-            with get_db() as session:
-                Files.update_file_data_by_id(
-                    file.id,
-                    {'status': 'failed'},
-                    db=session,
-                )
-                # Clear the hash so the file can be re-uploaded after fixing the issue
-                Files.update_file_hash_by_id(file.id, None, db=session)
-
-            if 'No pandoc was found' in str(e):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.PANDOC_NOT_INSTALLED,
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=str(e),
-                )
-
-    else:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    return build_retrieval_job(
+        actor_id=actor_id,
+        resource_id=file.id,
+        job_id=form_data.job_id,
+        payload={
+            'file_id': file.id,
+            'filename': file.filename,
+            'content_type': file.meta.get('content_type') if file.meta else None,
+            'collection_name': collection_name,
+            'processing_mode': 'inline',
+            'content_supplied': bool(form_data.content),
+        },
+    )
 
 
 class ProcessTextForm(BaseModel):

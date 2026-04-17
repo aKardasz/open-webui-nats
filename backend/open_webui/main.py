@@ -477,6 +477,8 @@ from open_webui.env import (
     REDIS_KEY_PREFIX,
     REDIS_SENTINEL_HOSTS,
     REDIS_SENTINEL_PORT,
+    NATS_URL,
+    RETRIEVAL_TRANSPORT,
     GLOBAL_LOG_LEVEL,
     MAX_BODY_LOG_SIZE,
     SAFE_MODE,
@@ -531,6 +533,8 @@ from open_webui.utils.middleware import (
     process_chat_response,
 )
 from open_webui.utils.tools import set_tool_servers, set_terminal_servers
+from open_webui.utils.retrieval_worker import start_retrieval_worker
+from open_webui.utils.retrieval_transport import build_retrieval_transport
 
 from open_webui.utils.auth import (
     get_license_data,
@@ -638,8 +642,11 @@ async def lifespan(app: FastAPI):
         async_mode=True,
     )
 
-    if app.state.redis is not None:
-        app.state.redis_task_command_listener = asyncio.create_task(redis_task_command_listener(app))
+    if app.state.redis is not None or NATS_URL:
+        app.state.task_command_listener = asyncio.create_task(redis_task_command_listener(app))
+
+    if RETRIEVAL_TRANSPORT == 'jetstream' and NATS_URL:
+        app.state.retrieval_worker = await start_retrieval_worker(app, NATS_URL)
 
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
@@ -704,8 +711,11 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    if hasattr(app.state, 'redis_task_command_listener'):
-        app.state.redis_task_command_listener.cancel()
+    if getattr(app.state, 'retrieval_worker', None) is not None:
+        await app.state.retrieval_worker.close()
+
+    if hasattr(app.state, 'task_command_listener'):
+        app.state.task_command_listener.cancel()
 
 
 app = FastAPI(
@@ -728,6 +738,7 @@ oauth_client_manager = OAuthClientManager(app)
 app.state.oauth_client_manager = oauth_client_manager
 
 app.state.instance_id = None
+app.state.retrieval_transport = build_retrieval_transport(RETRIEVAL_TRANSPORT, NATS_URL)
 app.state.config = AppConfig(
     redis_url=REDIS_URL,
     redis_sentinels=get_sentinels_from_env(REDIS_SENTINEL_HOSTS, REDIS_SENTINEL_PORT),

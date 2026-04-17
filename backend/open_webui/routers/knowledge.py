@@ -21,8 +21,6 @@ from open_webui.models.knowledge import (
 from open_webui.models.files import Files, FileModel, FileMetadataResponse
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
-    process_file,
-    ProcessFileForm,
     process_files_batch,
     BatchProcessFilesForm,
 )
@@ -31,6 +29,9 @@ from open_webui.storage.provider import Storage
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.utils.auth import get_verified_user, get_admin_user
 from open_webui.utils.access_control import has_permission, filter_allowed_access_grants
+from open_webui.utils.retrieval_commands import build_process_file_command
+from open_webui.utils.retrieval_submission import submit_file_retrieval
+from open_webui.utils.retrieval_transport import LocalRetrievalTransport
 from open_webui.models.access_grants import AccessGrants
 
 
@@ -320,10 +321,18 @@ async def reindex_knowledge_files(
             for file in files:
                 try:
                     await run_in_threadpool(
-                        process_file,
+                        submit_file_retrieval,
                         request,
-                        ProcessFileForm(file_id=file.id, collection_name=knowledge_base.id),
-                        user=user,
+                        file_item=file,
+                        user_id=user.id,
+                        command=build_process_file_command(
+                            file_id=file.id,
+                            source='knowledge_reindex',
+                            processing_mode='inline',
+                            content_type=(file.meta.get('content_type') if file.meta else None),
+                            collection_name=knowledge_base.id,
+                        ),
+                        transport=LocalRetrievalTransport(),
                         db=db,
                     )
                 except Exception as e:
@@ -659,10 +668,17 @@ def add_file_to_knowledge_by_id(
 
     # Add content to the vector database
     try:
-        process_file(
+        submit_file_retrieval(
             request,
-            ProcessFileForm(file_id=form_data.file_id, collection_name=id),
-            user=user,
+            file_item=file,
+            user_id=user.id,
+            command=build_process_file_command(
+                file_id=form_data.file_id,
+                source='knowledge_add',
+                processing_mode='inline',
+                content_type=(file.meta.get('content_type') if file.meta else None),
+                collection_name=id,
+            ),
             db=db,
         )
 
@@ -737,10 +753,17 @@ def update_file_from_knowledge_by_id(
 
     # Add content to the vector database
     try:
-        process_file(
+        submit_file_retrieval(
             request,
-            ProcessFileForm(file_id=form_data.file_id, collection_name=id),
-            user=user,
+            file_item=file,
+            user_id=user.id,
+            command=build_process_file_command(
+                file_id=form_data.file_id,
+                source='knowledge_update',
+                processing_mode='inline',
+                content_type=(file.meta.get('content_type') if file.meta else None),
+                collection_name=id,
+            ),
             db=db,
         )
     except Exception as e:

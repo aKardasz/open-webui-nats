@@ -43,14 +43,14 @@ from open_webui.models.access_grants import AccessGrants
 
 
 from open_webui.routers.retrieval import ProcessFileForm, process_file
-from open_webui.routers.audio import transcribe
 
 from open_webui.storage.provider import Storage
 
 
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.utils.misc import strict_match_mime_type
+from open_webui.utils.retrieval_commands import build_process_file_command
+from open_webui.utils.retrieval_submission import submit_file_retrieval
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -65,96 +65,6 @@ from open_webui.utils.access_control.files import has_access_to_file
 # What was entrusted here was given in good faith. Let it
 # be returned the same way, whole and undiminished.
 ############################
-
-
-def _is_text_file(file_path: str, chunk_size: int = 8192) -> bool:
-    """Check if a file is likely a text file by reading a chunk and validating UTF-8.
-
-    This catches files whose extensions are mis-mapped by mimetypes/browsers
-    (e.g. TypeScript .ts → video/mp2t) without maintaining an extension whitelist.
-    """
-    try:
-        resolved = Storage.get_file(file_path)
-        with open(resolved, 'rb') as f:
-            chunk = f.read(chunk_size)
-        if not chunk:
-            return False
-        # Null bytes are a strong indicator of binary content
-        if b'\x00' in chunk:
-            return False
-        chunk.decode('utf-8')
-        return True
-    except (UnicodeDecodeError, Exception):
-        return False
-
-
-def process_uploaded_file(
-    request,
-    file,
-    file_path,
-    file_item,
-    file_metadata,
-    user,
-    db: Optional[Session] = None,
-):
-    def _process_handler(db_session):
-        try:
-            content_type = file.content_type
-
-            # Detect mis-labeled text files (e.g. .ts → video/mp2t)
-            if content_type and content_type.startswith(('image/', 'video/')):
-                if _is_text_file(file_path):
-                    content_type = 'text/plain'
-
-            if content_type:
-                stt_supported_content_types = getattr(request.app.state.config, 'STT_SUPPORTED_CONTENT_TYPES', [])
-
-                if strict_match_mime_type(stt_supported_content_types, content_type):
-                    file_path_processed = Storage.get_file(file_path)
-                    result = transcribe(request, file_path_processed, file_metadata, user)
-
-                    process_file(
-                        request,
-                        ProcessFileForm(file_id=file_item.id, content=result.get('text', '')),
-                        user=user,
-                        db=db_session,
-                    )
-                elif (not content_type.startswith(('image/', 'video/'))) or (
-                    request.app.state.config.CONTENT_EXTRACTION_ENGINE == 'external'
-                ):
-                    process_file(
-                        request,
-                        ProcessFileForm(file_id=file_item.id),
-                        user=user,
-                        db=db_session,
-                    )
-                else:
-                    raise Exception(f'File type {content_type} is not supported for processing')
-            else:
-                log.info(f'File type {file.content_type} is not provided, but trying to process anyway')
-                process_file(
-                    request,
-                    ProcessFileForm(file_id=file_item.id),
-                    user=user,
-                    db=db_session,
-                )
-
-        except Exception as e:
-            log.error(f'Error processing file: {file_item.id}')
-            Files.update_file_data_by_id(
-                file_item.id,
-                {
-                    'status': 'failed',
-                    'error': str(e.detail) if hasattr(e, 'detail') else str(e),
-                },
-                db=db_session,
-            )
-
-    if db:
-        _process_handler(db)
-    else:
-        with SessionLocal() as db_session:
-            _process_handler(db_session)
 
 
 @router.post('/', response_model=FileModelResponse)
@@ -263,28 +173,22 @@ def upload_file_handler(
                 Channels.add_file_to_channel_by_id(channel.id, file_item.id, user.id, db=db)
 
         if process:
-            if background_tasks and process_in_background:
-                background_tasks.add_task(
-                    process_uploaded_file,
-                    request,
-                    file,
-                    file_path,
-                    file_item,
-                    file_metadata,
-                    user,
-                )
-                return {'status': True, **file_item.model_dump()}
-            else:
-                process_uploaded_file(
-                    request,
-                    file,
-                    file_path,
-                    file_item,
-                    file_metadata,
-                    user,
-                    db=db,
-                )
-                return {'status': True, **file_item.model_dump()}
+            processing_mode = 'background_task' if background_tasks and process_in_background else 'inline'
+            command = build_process_file_command(
+                file_id=file_item.id,
+                source='upload',
+                processing_mode=processing_mode,
+                content_type=(file_item.meta.get('content_type') if file_item.meta else None),
+            )
+            file_item, _ = submit_file_retrieval(
+                request,
+                file_item=file_item,
+                user_id=user.id,
+                command=command,
+                background_tasks=background_tasks,
+                db=db,
+            )
+            return {'status': True, **file_item.model_dump()}
         else:
             if file_item:
                 return file_item
@@ -540,16 +444,26 @@ def update_file_data_content_by_id(
 
     if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'write', user, db=db):
         try:
-            process_file(
+            file, _ = submit_file_retrieval(
                 request,
-                ProcessFileForm(file_id=id, content=form_data.content),
-                user=user,
+                file_item=file,
+                user_id=user.id,
+                command=build_process_file_command(
+                    file_id=id,
+                    source='content_update',
+                    processing_mode='inline',
+                    content_type=(file.meta.get('content_type') if file.meta else None),
+                    inline_content=form_data.content,
+                ),
                 db=db,
             )
-            file = Files.get_file_by_id(id=id, db=db)
         except Exception as e:
             log.exception(e)
             log.error(f'Error processing file: {file.id}')
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
 
         # Propagate content change to all knowledge collections referencing
         # this file.  Without this the old embeddings remain in the knowledge
@@ -560,10 +474,17 @@ def update_file_data_content_by_id(
                 # Remove old embeddings for this file from the KB collection
                 VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': id})
                 # Re-add from the now-updated file-{file_id} collection
-                process_file(
+                submit_file_retrieval(
                     request,
-                    ProcessFileForm(file_id=id, collection_name=knowledge.id),
-                    user=user,
+                    file_item=file,
+                    user_id=user.id,
+                    command=build_process_file_command(
+                        file_id=id,
+                        source='knowledge_refresh_after_content_update',
+                        processing_mode='inline',
+                        content_type=(file.meta.get('content_type') if file.meta else None),
+                        collection_name=knowledge.id,
+                    ),
                     db=db,
                 )
             except Exception as e:
