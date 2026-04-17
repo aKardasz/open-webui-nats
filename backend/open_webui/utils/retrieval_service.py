@@ -30,6 +30,7 @@ from open_webui.utils.retrieval_jobs import build_retrieval_job, build_retrieval
 from open_webui.utils.task_messaging import (
     RETRIEVAL_JOB_COMPLETED_SUBJECT,
     RETRIEVAL_JOB_FAILED_SUBJECT,
+    RETRIEVAL_JOB_PROGRESS_SUBJECT,
     RETRIEVAL_JOB_STARTED_SUBJECT,
     build_domain_event,
     publish_app_event_sync,
@@ -353,6 +354,15 @@ def process_file(request: Request, form_data: ProcessFileForm, *, user, db: Sess
         log.debug(f'text_content: {text_content}')
         Files.update_file_data_by_id(file.id, {'content': text_content}, db=db)
         content_hash = calculate_sha256_string(text_content)
+        _publish_retrieval_progress(
+            request,
+            retrieval_job=retrieval_job,
+            file_id=file.id,
+            collection_name=collection_name,
+            progress=50,
+            step='content_extracted',
+            document_count=len(docs),
+        )
 
         if request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
             Files.update_file_data_by_id(
@@ -409,6 +419,16 @@ def process_file(request: Request, form_data: ProcessFileForm, *, user, db: Sess
 
         if not result:
             raise Exception('Error saving document to vector database')
+
+        _publish_retrieval_progress(
+            request,
+            retrieval_job=retrieval_job,
+            file_id=file.id,
+            collection_name=collection_name,
+            progress=90,
+            step='indexed',
+            document_count=len(docs),
+        )
 
         with get_db() as session:
             Files.update_file_metadata_by_id(file.id, {'collection_name': collection_name}, db=session)
@@ -468,6 +488,36 @@ def process_file(request: Request, form_data: ProcessFileForm, *, user, db: Sess
             raise e
 
         raise RetrievalServiceError(str(e))
+
+
+def _publish_retrieval_progress(
+    request: Request,
+    *,
+    retrieval_job: dict,
+    file_id: str,
+    collection_name: Optional[str],
+    progress: int,
+    step: str,
+    document_count: Optional[int] = None,
+) -> None:
+    publish_app_event_sync(
+        request.app,
+        RETRIEVAL_JOB_PROGRESS_SUBJECT,
+        build_domain_event(
+            event_type='retrieval.job.progress',
+            resource_type='retrieval_job',
+            resource_id=retrieval_job['job_id'],
+            data={
+                'job_id': retrieval_job['job_id'],
+                'file_id': file_id,
+                'status': 'in_progress',
+                'collection_name': collection_name,
+                'progress': progress,
+                'step': step,
+                **({'document_count': document_count} if document_count is not None else {}),
+            },
+        ),
+    )
 
 
 def _prepare_documents(request: Request, file: FileModel, form_data: ProcessFileForm, user) -> tuple[list[Document], str]:

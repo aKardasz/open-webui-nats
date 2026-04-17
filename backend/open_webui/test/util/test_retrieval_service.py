@@ -1,9 +1,15 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 
 from open_webui.models.files import FileModel
+from open_webui.utils.task_messaging import (
+    RETRIEVAL_JOB_COMPLETED_SUBJECT,
+    RETRIEVAL_JOB_PROGRESS_SUBJECT,
+    RETRIEVAL_JOB_STARTED_SUBJECT,
+)
 from open_webui.utils.retrieval_service import (
     ProcessFileForm,
     RetrievalServiceError,
@@ -12,12 +18,12 @@ from open_webui.utils.retrieval_service import (
 )
 
 
-def _request():
+def _request(*, bypass: bool = True):
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 config=SimpleNamespace(
-                    BYPASS_EMBEDDING_AND_RETRIEVAL=True,
+                    BYPASS_EMBEDDING_AND_RETRIEVAL=bypass,
                 )
             )
         )
@@ -58,7 +64,7 @@ def test_process_file_bypass_path_returns_completed_payload():
         patch('open_webui.utils.retrieval_service.Files.get_file_by_id_and_user_id', return_value=file_item),
         patch('open_webui.utils.retrieval_service.Files.update_file_data_by_id'),
         patch('open_webui.utils.retrieval_service.Files.update_file_hash_by_id'),
-        patch('open_webui.utils.retrieval_service.publish_app_event_sync'),
+        patch('open_webui.utils.retrieval_service.publish_app_event_sync') as publish,
     ):
         result = process_file(
             request,
@@ -73,6 +79,55 @@ def test_process_file_bypass_path_returns_completed_payload():
         'filename': 'doc.txt',
         'content': 'hello',
     }
+    subjects = [call.args[1] for call in publish.call_args_list]
+    assert subjects == [
+        RETRIEVAL_JOB_STARTED_SUBJECT,
+        RETRIEVAL_JOB_PROGRESS_SUBJECT,
+        RETRIEVAL_JOB_COMPLETED_SUBJECT,
+    ]
+
+
+def test_process_file_non_bypass_path_publishes_progress_before_completion():
+    request = _request(bypass=False)
+    file_item = _file_item()
+    user = SimpleNamespace(id='user-1', role='user')
+    db = Mock()
+    db.commit = Mock()
+    session = Mock()
+
+    @contextmanager
+    def fake_get_db():
+        yield session
+
+    with (
+        patch('open_webui.utils.retrieval_service.Files.get_file_by_id_and_user_id', return_value=file_item),
+        patch('open_webui.utils.retrieval_service.Files.update_file_data_by_id'),
+        patch('open_webui.utils.retrieval_service.Files.update_file_metadata_by_id'),
+        patch('open_webui.utils.retrieval_service.Files.update_file_hash_by_id'),
+        patch('open_webui.utils.retrieval_service.save_docs_to_vector_db', return_value=True),
+        patch('open_webui.utils.retrieval_service.get_db', side_effect=fake_get_db),
+        patch('open_webui.utils.retrieval_service.publish_app_event_sync') as publish,
+    ):
+        result = process_file(
+            request,
+            ProcessFileForm(file_id='file-1', content='hello'),
+            user=user,
+            db=db,
+        )
+
+    assert result['status'] is True
+    subjects = [call.args[1] for call in publish.call_args_list]
+    assert subjects == [
+        RETRIEVAL_JOB_STARTED_SUBJECT,
+        RETRIEVAL_JOB_PROGRESS_SUBJECT,
+        RETRIEVAL_JOB_PROGRESS_SUBJECT,
+        RETRIEVAL_JOB_COMPLETED_SUBJECT,
+    ]
+    progress_events = [call.args[2]['data'] for call in publish.call_args_list if call.args[1] == RETRIEVAL_JOB_PROGRESS_SUBJECT]
+    assert progress_events[0]['step'] == 'content_extracted'
+    assert progress_events[0]['progress'] == 50
+    assert progress_events[1]['step'] == 'indexed'
+    assert progress_events[1]['progress'] == 90
 
 
 def test_resolve_retrieval_job_uses_process_file_command_contract():
