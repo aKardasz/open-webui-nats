@@ -808,6 +808,7 @@ app.state.OPENAI_MODELS = {}
 
 app.state.config.TOOL_SERVER_CONNECTIONS = TOOL_SERVER_CONNECTIONS
 app.state.TOOL_SERVERS = []
+app.state.RUNTIME_SERVICE_REGISTRY = []
 
 ########################################
 #

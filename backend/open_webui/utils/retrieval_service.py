@@ -500,6 +500,23 @@ def _publish_retrieval_progress(
     step: str,
     document_count: Optional[int] = None,
 ) -> None:
+    with get_db() as session:
+        Files.update_file_data_by_id(
+            file_id,
+            {
+                'status': 'processing',
+                'retrieval_job': build_retrieval_job_record(
+                    retrieval_job,
+                    status='started',
+                    collection_name=collection_name,
+                    progress=progress,
+                    step=step,
+                    document_count=document_count,
+                ),
+            },
+            db=session,
+        )
+
     publish_app_event_sync(
         request.app,
         RETRIEVAL_JOB_PROGRESS_SUBJECT,
@@ -510,7 +527,7 @@ def _publish_retrieval_progress(
             data={
                 'job_id': retrieval_job['job_id'],
                 'file_id': file_id,
-                'status': 'in_progress',
+                'status': 'processing',
                 'collection_name': collection_name,
                 'progress': progress,
                 'step': step,

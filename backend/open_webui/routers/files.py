@@ -362,9 +362,12 @@ async def get_file_process_status(
                     if file_item:
                         data = file_item.model_dump().get('data', {})
                         status = data.get('status')
+                        retrieval_job = data.get('retrieval_job')
 
                         if status:
                             event = {'status': status}
+                            if retrieval_job is not None:
+                                event['retrieval_job'] = retrieval_job
                             if status == 'failed':
                                 event['error'] = data.get('error')
 
@@ -385,7 +388,10 @@ async def get_file_process_status(
                 media_type='text/event-stream',
             )
         else:
-            return {'status': file.data.get('status', 'pending')}
+            return {
+                'status': file.data.get('status', 'pending'),
+                'retrieval_job': file.data.get('retrieval_job'),
+            }
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

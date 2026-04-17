@@ -51,8 +51,10 @@ from open_webui.env import (
     ENABLE_FORWARD_USER_INFO_HEADERS,
     FORWARD_SESSION_INFO_HEADER_CHAT_ID,
     FORWARD_SESSION_INFO_HEADER_MESSAGE_ID,
+    NATS_URL,
 )
 from open_webui.utils.headers import include_user_info_headers
+from open_webui.utils.runtime_registry import sync_runtime_registry
 from open_webui.tools.builtin import (
     search_web,
     fetch_url,
@@ -797,6 +799,8 @@ async def set_tool_servers(request: Request):
     if request.app.state.redis is not None:
         await request.app.state.redis.set('tool_servers', json.dumps(request.app.state.TOOL_SERVERS))
 
+    await sync_runtime_registry(request.app, nats_url=NATS_URL)
+
     return request.app.state.TOOL_SERVERS
 
 
@@ -931,6 +935,8 @@ async def set_terminal_servers(request: Request):
 
     if request.app.state.redis is not None:
         await request.app.state.redis.set('terminal_servers', json.dumps(request.app.state.TERMINAL_SERVERS))
+
+    await sync_runtime_registry(request.app, nats_url=NATS_URL)
 
     return request.app.state.TERMINAL_SERVERS
 
