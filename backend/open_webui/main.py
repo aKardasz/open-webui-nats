@@ -687,9 +687,10 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f'Failed to pre-fetch models at startup: {e}')
 
-    # Pre-fetch tool server specs so the first request doesn't pay the latency cost
-    if not WORKER_ONLY_MODE and len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
-        log.info('Initializing tool servers...')
+    # Pre-fetch runtime capability specs so the first request doesn't pay the latency cost.
+    if not WORKER_ONLY_MODE and (
+        len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0 or len(app.state.config.TERMINAL_SERVER_CONNECTIONS) > 0
+    ):
         try:
             mock_request = Request(
                 {
@@ -706,11 +707,16 @@ async def lifespan(app: FastAPI):
                     'app': app,
                 }
             )
-            await set_tool_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
 
-            await set_terminal_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
+            if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
+                log.info('Initializing tool servers...')
+                await set_tool_servers(mock_request)
+                log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
+
+            if len(app.state.config.TERMINAL_SERVER_CONNECTIONS) > 0:
+                log.info('Initializing terminal servers...')
+                await set_terminal_servers(mock_request)
+                log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
         except Exception as e:
             log.warning(f'Failed to initialize tool/terminal servers at startup: {e}')
 

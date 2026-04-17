@@ -54,7 +54,11 @@ from open_webui.env import (
     NATS_URL,
 )
 from open_webui.utils.headers import include_user_info_headers
-from open_webui.utils.runtime_registry import annotate_runtime_service_metadata, sync_runtime_registry
+from open_webui.utils.runtime_registry import (
+    annotate_runtime_service_metadata,
+    refresh_runtime_registry,
+    sync_runtime_registry,
+)
 from open_webui.tools.builtin import (
     search_web,
     fetch_url,
@@ -820,6 +824,7 @@ async def get_tool_servers(request: Request):
     if not tool_servers:
         tool_servers = await set_tool_servers(request)
     else:
+        await refresh_runtime_registry(request.app, nats_url=NATS_URL)
         tool_servers = annotate_runtime_service_metadata(
             request.app,
             tool_servers,
@@ -969,6 +974,7 @@ async def get_terminal_servers(request: Request):
     if not terminal_servers:
         terminal_servers = await set_terminal_servers(request)
     else:
+        await refresh_runtime_registry(request.app, nats_url=NATS_URL)
         terminal_servers = annotate_runtime_service_metadata(
             request.app,
             terminal_servers,

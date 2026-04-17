@@ -10,6 +10,7 @@ from open_webui.utils.runtime_registry import (
     build_runtime_service_records,
     get_runtime_service_records,
     is_runtime_service_record_fresh,
+    refresh_runtime_registry,
     sync_runtime_registry,
 )
 
@@ -80,6 +81,20 @@ async def test_sync_runtime_registry_skips_publish_when_nats_disabled():
 
     assert app.state.RUNTIME_SERVICE_REGISTRY == records
     sync.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refresh_runtime_registry_prefers_kv_records_when_available():
+    app = SimpleNamespace(state=SimpleNamespace(RUNTIME_SERVICE_REGISTRY=[]))
+
+    with patch(
+        'open_webui.utils.runtime_registry._load_registry_from_kv',
+        new=AsyncMock(return_value=[{'service_id': 'terminal.term-1', 'service_type': 'terminal'}]),
+    ):
+        records = await refresh_runtime_registry(app, nats_url='nats://nats:4222')
+
+    assert records == [{'service_id': 'terminal.term-1', 'service_type': 'terminal'}]
+    assert app.state.RUNTIME_SERVICE_REGISTRY == records
 
 
 @pytest.mark.asyncio

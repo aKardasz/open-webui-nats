@@ -94,6 +94,25 @@ def get_runtime_service_records(
     return records
 
 
+async def refresh_runtime_registry(app, *, nats_url: str) -> List[Dict[str, Any]]:
+    if not nats_url:
+        return list(getattr(app.state, 'RUNTIME_SERVICE_REGISTRY', []))
+
+    try:
+        records = await _load_registry_from_kv(
+            nats_url,
+            instance_id=getattr(app.state, 'instance_id', None),
+        )
+        if records:
+            app.state.RUNTIME_SERVICE_REGISTRY = records
+    except ImportError:
+        log.warning('NATS runtime registry read skipped because nats-py is not installed.')
+    except Exception:
+        log.exception('Failed to refresh runtime registry from JetStream KV.')
+
+    return list(getattr(app.state, 'RUNTIME_SERVICE_REGISTRY', []))
+
+
 def annotate_runtime_service_metadata(
     app,
     servers: List[Dict[str, Any]],
@@ -197,6 +216,24 @@ async def _sync_registry_to_kv(
 
         for record in records:
             await registry_kv.put(record['service_id'], json.dumps(record).encode('utf-8'))
+    finally:
+        await nc.drain()
+
+
+async def _load_registry_from_kv(
+    nats_url: str,
+    *,
+    instance_id: str | None = None,
+) -> List[Dict[str, Any]]:
+    nc = await _connect_nats(nats_url, instance_id=instance_id)
+    try:
+        registry_kv = await _get_or_create_key_value(nc.jetstream(), REGISTRY_BUCKET)
+        keys = await registry_kv.keys() or []
+        records: List[Dict[str, Any]] = []
+        for key in keys:
+            entry = await registry_kv.get(key)
+            records.append(json.loads(entry.value.decode('utf-8')))
+        return records
     finally:
         await nc.drain()
 

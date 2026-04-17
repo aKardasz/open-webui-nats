@@ -133,6 +133,7 @@ async def upload_pipeline(
 ):
     log.info(f'upload_pipeline: urlIdx={urlIdx}, filename={file.filename}')
     filename = os.path.basename(file.filename)
+    adapter = HttpPipelineAdapter(request)
 
     # Check if the uploaded file is a python file
     if not (filename and filename.endswith('.py')):
@@ -145,56 +146,17 @@ async def upload_pipeline(
     os.makedirs(upload_folder, exist_ok=True)
     file_path = os.path.join(upload_folder, filename)
 
-    response = None
     try:
         # Save the uploaded file
         with open(file_path, 'wb') as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        url = request.app.state.config.OPENAI_API_BASE_URLS[urlIdx]
-        key = request.app.state.config.OPENAI_API_KEYS[urlIdx]
-
-        headers = {'Authorization': f'Bearer {key}'}
-
-        async with aiohttp.ClientSession(trust_env=True) as session:
-            with open(file_path, 'rb') as f:
-                form_data = aiohttp.FormData()
-                form_data.add_field(
-                    'file',
-                    f,
-                    filename=filename,
-                    content_type='application/octet-stream',
-                )
-
-                async with session.post(
-                    f'{url}/pipelines/upload',
-                    headers=headers,
-                    data=form_data,
-                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
-                ) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-
-        return {**data}
+        return await adapter.upload_file(urlIdx, 'pipelines/upload', file_path=file_path, filename=filename)
+    except PipelineAdapterError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception as e:
-        # Handle connection error here
         log.exception(f'Connection error: {e}')
-
-        detail = None
-        status_code = status.HTTP_404_NOT_FOUND
-        if response is not None:
-            status_code = response.status
-            try:
-                res = await response.json()
-                if 'detail' in res:
-                    detail = res['detail']
-            except Exception:
-                pass
-
-        raise HTTPException(
-            status_code=status_code,
-            detail=detail if detail else 'Pipeline not found',
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Pipeline not found')
     finally:
         # Ensure the file is deleted after the upload is completed or on failure
         if os.path.exists(file_path):

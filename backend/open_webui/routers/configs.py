@@ -6,7 +6,7 @@ import aiohttp
 
 from typing import Optional
 
-from open_webui.env import AIOHTTP_CLIENT_TIMEOUT
+from open_webui.env import AIOHTTP_CLIENT_TIMEOUT, NATS_URL
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.config import get_config, save_config
 from open_webui.config import BannerModel
@@ -17,7 +17,7 @@ from open_webui.utils.tools import (
     set_tool_servers,
     set_terminal_servers,
 )
-from open_webui.utils.runtime_registry import get_runtime_service_records
+from open_webui.utils.runtime_registry import get_runtime_service_records, refresh_runtime_registry
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.models.oauth_sessions import OAuthSessions
 
@@ -254,6 +254,7 @@ async def get_runtime_registry_config(
     freshness_seconds: Optional[int] = None,
     user=Depends(get_admin_user),
 ):
+    await refresh_runtime_registry(request.app, nats_url=NATS_URL)
     return {
         'RUNTIME_SERVICE_REGISTRY': get_runtime_service_records(
             request.app,

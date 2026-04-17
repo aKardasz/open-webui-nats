@@ -122,3 +122,15 @@ async def test_http_pipeline_adapter_delete_json_returns_payload():
         result = await adapter.delete_json(0, 'pipelines/delete', {'id': 'pipe-1'})
 
     assert result == {'deleted': True}
+
+
+@pytest.mark.asyncio
+async def test_http_pipeline_adapter_upload_file_returns_payload(tmp_path):
+    adapter = HttpPipelineAdapter(_request())
+    file_path = tmp_path / 'pipe.py'
+    file_path.write_text('print(\"ok\")', encoding='utf-8')
+
+    with patch('open_webui.utils.pipeline_adapter.aiohttp.ClientSession', return_value=FakeSession(FakeResponse(payload={'uploaded': True}))):
+        result = await adapter.upload_file(0, 'pipelines/upload', file_path=str(file_path), filename='pipe.py')
+
+    assert result == {'uploaded': True}
