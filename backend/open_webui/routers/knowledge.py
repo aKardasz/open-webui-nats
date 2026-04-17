@@ -31,7 +31,6 @@ from open_webui.utils.auth import get_verified_user, get_admin_user
 from open_webui.utils.access_control import has_permission, filter_allowed_access_grants
 from open_webui.utils.retrieval_commands import build_process_file_command
 from open_webui.utils.retrieval_submission import submit_file_retrieval
-from open_webui.utils.retrieval_transport import LocalRetrievalTransport
 from open_webui.models.access_grants import AccessGrants
 
 
@@ -332,7 +331,6 @@ async def reindex_knowledge_files(
                             content_type=(file.meta.get('content_type') if file.meta else None),
                             collection_name=knowledge_base.id,
                         ),
-                        transport=LocalRetrievalTransport(),
                         db=db,
                     )
                 except Exception as e:

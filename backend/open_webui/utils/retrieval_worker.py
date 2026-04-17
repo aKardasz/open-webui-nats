@@ -6,6 +6,7 @@ from typing import Optional
 
 from open_webui.env import NATS_CONNECT_TIMEOUT, NATS_NAME
 from open_webui.utils.retrieval_execution import execute_retrieval_job
+from open_webui.utils.retrieval_jobs import verify_retrieval_job
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +135,11 @@ class JetStreamRetrievalWorker:
             retrieval_job = json.loads(message.data.decode('utf-8'))
         except Exception:
             log.exception('JetStream retrieval worker received invalid retrieval payload.')
+            await message.ack()
+            return
+
+        if not verify_retrieval_job(retrieval_job):
+            log.warning('JetStream retrieval worker received unsigned or invalidly signed retrieval job.')
             await message.ack()
             return
 

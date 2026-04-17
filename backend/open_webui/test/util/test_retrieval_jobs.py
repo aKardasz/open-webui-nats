@@ -3,6 +3,7 @@ from open_webui.utils.retrieval_jobs import (
     build_retrieval_job,
     build_retrieval_job_record,
     get_retrieval_job_reply_subject,
+    verify_retrieval_job,
 )
 
 
@@ -30,7 +31,9 @@ def test_build_retrieval_job_uses_expected_contract_shape():
             'file_id': 'file-1',
             'collection_name': 'file-file-1',
         },
+        'signature': job['signature'],
     }
+    assert verify_retrieval_job(job)
 
 
 def test_build_retrieval_job_record_preserves_envelope_and_status():
@@ -52,3 +55,16 @@ def test_build_retrieval_job_record_preserves_envelope_and_status():
 
 def test_get_retrieval_job_reply_subject_is_partitioned_by_job_id():
     assert get_retrieval_job_reply_subject('job-123') == 'owui.evt.retrieval.job.job-123'
+
+
+def test_verify_retrieval_job_rejects_tampered_payload():
+    job = build_retrieval_job(
+        actor_id='user-1',
+        resource_id='file-1',
+        job_id='job-1',
+        payload={'file_id': 'file-1'},
+    )
+
+    job['payload']['file_id'] = 'file-2'
+
+    assert not verify_retrieval_job(job)

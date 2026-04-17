@@ -182,7 +182,7 @@ If you want to enable the internal NATS control-plane hooks without changing the
 docker compose -f docker-compose.yaml -f docker-compose.nats.yaml up -d
 ```
 
-This adds a local NATS server with JetStream enabled and sets `NATS_URL=nats://nats:4222` for the `open-webui` service. If you do not include the overlay, Open WebUI keeps the existing Redis/local-only behavior.
+This adds a local NATS server with JetStream enabled and keeps the existing Redis/local-only application behavior unless you explicitly opt into additional migration settings such as `RETRIEVAL_TRANSPORT=jetstream`. If you do not include the overlay, Open WebUI keeps the existing Redis/local-only behavior.
 
 ### Troubleshooting
 
