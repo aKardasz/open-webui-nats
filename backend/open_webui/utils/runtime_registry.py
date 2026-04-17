@@ -75,6 +75,43 @@ def build_runtime_service_records(
     return records
 
 
+def get_runtime_service_records(
+    app,
+    *,
+    service_type: str | None = None,
+    require_healthy: bool = True,
+    freshness_seconds: int | None = None,
+    now: datetime | None = None,
+) -> List[Dict[str, Any]]:
+    records = list(getattr(app.state, 'RUNTIME_SERVICE_REGISTRY', []))
+    if service_type is not None:
+        records = [record for record in records if record.get('service_type') == service_type]
+    if require_healthy:
+        records = [record for record in records if record.get('status') == 'healthy']
+    if freshness_seconds is not None:
+        records = [record for record in records if is_runtime_service_record_fresh(record, freshness_seconds, now=now)]
+    return records
+
+
+def is_runtime_service_record_fresh(
+    record: Dict[str, Any],
+    freshness_seconds: int,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    observed_at = record.get('observed_at')
+    if not observed_at:
+        return False
+
+    try:
+        observed = datetime.fromisoformat(observed_at.replace('Z', '+00:00'))
+    except ValueError:
+        return False
+
+    current = now or datetime.now(timezone.utc)
+    return (current - observed).total_seconds() <= freshness_seconds
+
+
 async def sync_runtime_registry(app, *, nats_url: str) -> List[Dict[str, Any]]:
     records = build_runtime_service_records(
         tool_servers=getattr(app.state, 'TOOL_SERVERS', []),
@@ -112,6 +149,12 @@ async def _sync_registry_to_kv(
         registry_kv = await _get_or_create_key_value(js, REGISTRY_BUCKET)
         await _get_or_create_key_value(js, ROUTING_BUCKET)
         await _get_or_create_key_value(js, FEATURE_FLAGS_BUCKET)
+
+        current_service_ids = {record['service_id'] for record in records}
+        existing_keys = await registry_kv.keys() or []
+        for key in existing_keys:
+            if key.startswith(('tool-executor.', 'terminal.')) and key not in current_service_ids:
+                await registry_kv.delete(key)
 
         for record in records:
             await registry_kv.put(record['service_id'], json.dumps(record).encode('utf-8'))
