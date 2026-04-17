@@ -533,7 +533,7 @@ from open_webui.utils.middleware import (
     process_chat_response,
 )
 from open_webui.utils.tools import set_tool_servers, set_terminal_servers
-from open_webui.utils.retrieval_worker import start_retrieval_worker
+from open_webui.utils.retrieval_worker import start_retrieval_worker_with_retry
 from open_webui.utils.retrieval_transport import build_retrieval_transport
 
 from open_webui.utils.auth import (
@@ -646,7 +646,7 @@ async def lifespan(app: FastAPI):
         app.state.task_command_listener = asyncio.create_task(redis_task_command_listener(app))
 
     if RETRIEVAL_TRANSPORT == 'jetstream' and NATS_URL:
-        app.state.retrieval_worker = await start_retrieval_worker(app, NATS_URL)
+        app.state.retrieval_worker = await start_retrieval_worker_with_retry(app, NATS_URL)
 
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()

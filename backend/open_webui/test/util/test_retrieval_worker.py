@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -5,7 +6,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from open_webui.utils.retrieval_jobs import build_retrieval_job
-from open_webui.utils.retrieval_worker import JetStreamRetrievalWorker, publish_retrieval_job_sync
+from open_webui.utils.retrieval_worker import (
+    JetStreamRetrievalWorker,
+    publish_retrieval_job_sync,
+    start_retrieval_worker_with_retry,
+)
 
 
 def test_publish_retrieval_job_sync_schedules_on_main_loop():
@@ -76,3 +81,55 @@ async def test_worker_acks_invalidly_signed_messages_without_executing():
     to_thread.assert_not_awaited()
     message.ack.assert_awaited_once()
     message.nak.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_start_retrieval_worker_with_retry_retries_transient_failures_until_started():
+    app = SimpleNamespace(state=SimpleNamespace(instance_id='instance-1'))
+    attempts = []
+
+    class FakeWorker:
+        def __init__(self, _app, _nats_url, _instance_id):
+            self.retryable_failure = False
+
+        async def start(self):
+            attempts.append('start')
+            if len(attempts) == 1:
+                self.retryable_failure = True
+                return False
+            return True
+
+        async def close(self):
+            return None
+
+    with patch('open_webui.utils.retrieval_worker.JetStreamRetrievalWorker', FakeWorker):
+        supervisor = await start_retrieval_worker_with_retry(app, 'nats://nats:4222', retry_delay=0)
+        await asyncio.wait_for(supervisor._task, timeout=1)
+
+    assert len(attempts) == 2
+    await supervisor.close()
+
+
+@pytest.mark.asyncio
+async def test_start_retrieval_worker_with_retry_stops_on_permanent_failure():
+    app = SimpleNamespace(state=SimpleNamespace(instance_id='instance-1'))
+    attempts = []
+
+    class FakeWorker:
+        def __init__(self, _app, _nats_url, _instance_id):
+            self.retryable_failure = False
+
+        async def start(self):
+            attempts.append('start')
+            self.retryable_failure = False
+            return False
+
+        async def close(self):
+            return None
+
+    with patch('open_webui.utils.retrieval_worker.JetStreamRetrievalWorker', FakeWorker):
+        supervisor = await start_retrieval_worker_with_retry(app, 'nats://nats:4222', retry_delay=0)
+        await asyncio.wait_for(supervisor._task, timeout=1)
+
+    assert len(attempts) == 1
+    await supervisor.close()

@@ -19,6 +19,7 @@ RETRIEVAL_JOB_ACK_WAIT = 60.0
 RETRIEVAL_JOB_BACKOFF = [1.0, 5.0, 30.0]
 RETRIEVAL_JOB_MAX_DELIVER = 3
 RETRIEVAL_JOB_MAX_ACK_PENDING = 1
+RETRIEVAL_WORKER_RETRY_DELAY = 5.0
 
 
 async def publish_retrieval_job(nats_url: str, retrieval_job: dict, *, instance_id: Optional[str] = None) -> None:
@@ -56,25 +57,91 @@ async def start_retrieval_worker(app, nats_url: str):
     return None
 
 
+async def start_retrieval_worker_with_retry(
+    app,
+    nats_url: str,
+    *,
+    retry_delay: float = RETRIEVAL_WORKER_RETRY_DELAY,
+):
+    supervisor = RetryingJetStreamRetrievalWorker(
+        app,
+        nats_url,
+        getattr(app.state, 'instance_id', None),
+        retry_delay=retry_delay,
+    )
+    await supervisor.start()
+    return supervisor
+
+
+class RetryingJetStreamRetrievalWorker:
+    def __init__(self, app, nats_url: str, instance_id: Optional[str] = None, *, retry_delay: float = 5.0):
+        self.app = app
+        self.nats_url = nats_url
+        self.instance_id = instance_id or 'unknown'
+        self.retry_delay = retry_delay
+        self._worker = None
+        self._task = None
+
+    async def start(self):
+        self._task = asyncio.create_task(self._run())
+        return self
+
+    async def close(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+        if self._worker is not None:
+            await self._worker.close()
+            self._worker = None
+
+    async def _run(self) -> None:
+        while True:
+            worker = JetStreamRetrievalWorker(self.app, self.nats_url, self.instance_id)
+            started = await worker.start()
+            if started:
+                self._worker = worker
+                return
+
+            await worker.close()
+
+            if not worker.retryable_failure:
+                return
+
+            log.warning(
+                'JetStream retrieval worker startup failed; retrying in %.1f seconds.',
+                self.retry_delay,
+            )
+            await asyncio.sleep(self.retry_delay)
+
+
 class JetStreamRetrievalWorker:
     def __init__(self, app, nats_url: str, instance_id: Optional[str] = None):
         self.app = app
         self.nats_url = nats_url
         self.instance_id = instance_id or 'unknown'
+        self.retryable_failure = False
         self._nc = None
         self._subscription = None
         self._task = None
 
     async def start(self) -> bool:
         if not self.nats_url:
+            self.retryable_failure = False
             return False
 
         try:
             self._nc = await _connect_nats(self.nats_url, instance_id=self.instance_id)
         except ImportError:
+            self.retryable_failure = False
             log.warning('RETRIEVAL_TRANSPORT=jetstream selected, but nats-py is not installed.')
             return False
         except Exception:
+            self.retryable_failure = True
             log.exception('Failed to connect embedded JetStream retrieval worker.')
             return False
 
@@ -87,6 +154,7 @@ class JetStreamRetrievalWorker:
             stream=RETRIEVAL_JOB_STREAM,
         )
         self._task = asyncio.create_task(self._run())
+        self.retryable_failure = False
         return True
 
     async def close(self) -> None:

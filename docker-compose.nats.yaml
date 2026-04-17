@@ -13,6 +13,11 @@ services:
       - ${NATS_MONITOR_PORT-8222}:8222
     volumes:
       - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   open-webui:
