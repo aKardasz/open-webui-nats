@@ -478,7 +478,9 @@ from open_webui.env import (
     REDIS_SENTINEL_HOSTS,
     REDIS_SENTINEL_PORT,
     NATS_URL,
+    ENABLE_EMBEDDED_RETRIEVAL_WORKER,
     RETRIEVAL_TRANSPORT,
+    WORKER_ONLY_MODE,
     GLOBAL_LOG_LEVEL,
     MAX_BODY_LOG_SIZE,
     SAFE_MODE,
@@ -533,7 +535,7 @@ from open_webui.utils.middleware import (
     process_chat_response,
 )
 from open_webui.utils.tools import set_tool_servers, set_terminal_servers
-from open_webui.utils.retrieval_worker import start_retrieval_worker_with_retry
+from open_webui.utils.retrieval_worker import should_start_retrieval_worker, start_retrieval_worker_with_retry
 from open_webui.utils.retrieval_transport import build_retrieval_transport
 
 from open_webui.utils.auth import (
@@ -642,20 +644,26 @@ async def lifespan(app: FastAPI):
         async_mode=True,
     )
 
-    if app.state.redis is not None or NATS_URL:
+    if not WORKER_ONLY_MODE and (app.state.redis is not None or NATS_URL):
         app.state.task_command_listener = asyncio.create_task(redis_task_command_listener(app))
 
-    if RETRIEVAL_TRANSPORT == 'jetstream' and NATS_URL:
+    if should_start_retrieval_worker(
+        transport_name=RETRIEVAL_TRANSPORT,
+        nats_url=NATS_URL,
+        enable_embedded_worker=ENABLE_EMBEDDED_RETRIEVAL_WORKER,
+        worker_only_mode=WORKER_ONLY_MODE,
+    ):
         app.state.retrieval_worker = await start_retrieval_worker_with_retry(app, NATS_URL)
 
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
 
-    asyncio.create_task(periodic_usage_pool_cleanup())
-    asyncio.create_task(periodic_session_pool_cleanup())
+    if not WORKER_ONLY_MODE:
+        asyncio.create_task(periodic_usage_pool_cleanup())
+        asyncio.create_task(periodic_session_pool_cleanup())
 
-    if app.state.config.ENABLE_BASE_MODELS_CACHE:
+    if not WORKER_ONLY_MODE and app.state.config.ENABLE_BASE_MODELS_CACHE:
         try:
             await get_all_models(
                 Request(
@@ -680,7 +688,7 @@ async def lifespan(app: FastAPI):
             log.warning(f'Failed to pre-fetch models at startup: {e}')
 
     # Pre-fetch tool server specs so the first request doesn't pay the latency cost
-    if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
+    if not WORKER_ONLY_MODE and len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
         log.info('Initializing tool servers...')
         try:
             mock_request = Request(
@@ -705,6 +713,9 @@ async def lifespan(app: FastAPI):
             log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
         except Exception as e:
             log.warning(f'Failed to initialize tool/terminal servers at startup: {e}')
+
+    if WORKER_ONLY_MODE:
+        log.info('Running in worker-only mode; skipped web-tier startup warmup tasks.')
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True

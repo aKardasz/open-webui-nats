@@ -23,6 +23,30 @@ services:
   open-webui:
     environment:
       - 'NATS_URL=nats://nats:4222'
+      - 'ENABLE_EMBEDDED_RETRIEVAL_WORKER=false'
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  retrieval-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-main}
+    container_name: open-webui-retrieval-worker
+    command: ["python", "-m", "open_webui", "retrieval-worker"]
+    environment:
+      - 'NATS_URL=nats://nats:4222'
+      - 'RETRIEVAL_TRANSPORT=jetstream'
+      - 'ENABLE_EMBEDDED_RETRIEVAL_WORKER=true'
+      - 'WORKER_ONLY_MODE=true'
+      - 'WEBUI_SECRET_KEY='
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   nats-data: {}

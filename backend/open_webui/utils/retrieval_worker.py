@@ -22,6 +22,18 @@ RETRIEVAL_JOB_MAX_ACK_PENDING = 1
 RETRIEVAL_WORKER_RETRY_DELAY = 5.0
 
 
+def should_start_retrieval_worker(
+    *,
+    transport_name: str,
+    nats_url: str,
+    enable_embedded_worker: bool,
+    worker_only_mode: bool,
+) -> bool:
+    if transport_name != 'jetstream' or not nats_url:
+        return False
+    return worker_only_mode or enable_embedded_worker
+
+
 async def publish_retrieval_job(nats_url: str, retrieval_job: dict, *, instance_id: Optional[str] = None) -> None:
     nc = await _connect_nats(nats_url, instance_id=instance_id)
     try:
@@ -182,11 +194,12 @@ class JetStreamRetrievalWorker:
 
     async def _run(self) -> None:
         from nats.js.errors import FetchTimeoutError
+        from nats.errors import TimeoutError as NatsTimeoutError
 
         while True:
             try:
                 messages = await self._subscription.fetch(batch=1, timeout=1)
-            except FetchTimeoutError:
+            except (FetchTimeoutError, NatsTimeoutError):
                 continue
             except asyncio.CancelledError:
                 raise

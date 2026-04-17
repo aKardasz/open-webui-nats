@@ -184,6 +184,8 @@ docker compose -f docker-compose.yaml -f docker-compose.nats.yaml up -d
 
 This adds a local NATS server with JetStream enabled and keeps the existing Redis/local-only application behavior unless you explicitly opt into additional migration settings such as `RETRIEVAL_TRANSPORT=jetstream`. If you do not include the overlay, Open WebUI keeps the existing Redis/local-only behavior.
 
+The overlay now also includes a dedicated `retrieval-worker` service and disables embedded retrieval-worker startup in the `open-webui` service. The worker runs via `python -m open_webui retrieval-worker`, which starts the retrieval consumer in worker-only mode while the web process remains browser-facing.
+
 ### Troubleshooting
 
 Encountering connection issues? Our [Open WebUI Documentation](https://docs.openwebui.com/troubleshooting/) has got you covered. For further assistance and to join our vibrant community, visit the [Open WebUI Discord](https://discord.gg/5rJgQTnV4s).

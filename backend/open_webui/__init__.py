@@ -1,6 +1,8 @@
 import base64
+import asyncio
 import os
 import random
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -10,6 +12,18 @@ import uvicorn
 app = typer.Typer()
 
 KEY_FILE = Path.cwd() / '.webui_secret_key'
+
+
+def ensure_webui_secret_key() -> None:
+    if os.getenv('WEBUI_SECRET_KEY') is not None:
+        return
+
+    typer.echo('Loading WEBUI_SECRET_KEY from file, not provided as an environment variable.')
+    if not KEY_FILE.exists():
+        typer.echo(f'Generating a new secret key and saving it to {KEY_FILE}')
+        KEY_FILE.write_bytes(base64.b64encode(random.randbytes(12)))
+    typer.echo(f'Loading WEBUI_SECRET_KEY from {KEY_FILE}')
+    os.environ['WEBUI_SECRET_KEY'] = KEY_FILE.read_text()
 
 
 def version_callback(value: bool) -> None:
@@ -33,13 +47,7 @@ def serve(
     port: int = 8080,
 ):
     os.environ['FROM_INIT_PY'] = 'true'
-    if os.getenv('WEBUI_SECRET_KEY') is None:
-        typer.echo('Loading WEBUI_SECRET_KEY from file, not provided as an environment variable.')
-        if not KEY_FILE.exists():
-            typer.echo(f'Generating a new secret key and saving it to {KEY_FILE}')
-            KEY_FILE.write_bytes(base64.b64encode(random.randbytes(12)))
-        typer.echo(f'Loading WEBUI_SECRET_KEY from {KEY_FILE}')
-        os.environ['WEBUI_SECRET_KEY'] = KEY_FILE.read_text()
+    ensure_webui_secret_key()
 
     if os.getenv('USE_CUDA_DOCKER', 'false') == 'true':
         typer.echo('CUDA is enabled, appending LD_LIBRARY_PATH to include torch/cudnn & cublas libraries.')
@@ -90,6 +98,32 @@ def dev(
         reload=reload,
         forwarded_allow_ips='*',
     )
+
+
+@app.command(name='retrieval-worker')
+def retrieval_worker():
+    os.environ['FROM_INIT_PY'] = 'true'
+    os.environ['WORKER_ONLY_MODE'] = 'true'
+    os.environ.setdefault('RETRIEVAL_TRANSPORT', 'jetstream')
+    os.environ.setdefault('ENABLE_EMBEDDED_RETRIEVAL_WORKER', 'true')
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+    ensure_webui_secret_key()
+
+    async def _run():
+        import open_webui.main
+
+        app_instance = open_webui.main.app
+        async with app_instance.router.lifespan_context(app_instance):
+            if getattr(app_instance.state, 'retrieval_worker', None) is None:
+                raise RuntimeError('Retrieval worker failed to start in worker-only mode.')
+
+            while True:
+                await asyncio.sleep(3600)
+
+    asyncio.run(_run())
 
 
 if __name__ == '__main__':

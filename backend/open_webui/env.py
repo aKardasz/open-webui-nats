@@ -454,6 +454,9 @@ RETRIEVAL_TRANSPORT = os.environ.get('RETRIEVAL_TRANSPORT', 'local').strip().low
 if RETRIEVAL_TRANSPORT not in {'local', 'jetstream'}:
     RETRIEVAL_TRANSPORT = 'local'
 
+ENABLE_EMBEDDED_RETRIEVAL_WORKER = os.environ.get('ENABLE_EMBEDDED_RETRIEVAL_WORKER', 'true').lower() == 'true'
+WORKER_ONLY_MODE = os.environ.get('WORKER_ONLY_MODE', 'false').lower() == 'true'
+
 ####################################
 # UVICORN WORKERS
 ####################################

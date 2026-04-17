@@ -4,11 +4,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from nats.errors import TimeoutError as NatsTimeoutError
 
 from open_webui.utils.retrieval_jobs import build_retrieval_job
 from open_webui.utils.retrieval_worker import (
     JetStreamRetrievalWorker,
     publish_retrieval_job_sync,
+    should_start_retrieval_worker,
     start_retrieval_worker_with_retry,
 )
 
@@ -133,3 +135,42 @@ async def test_start_retrieval_worker_with_retry_stops_on_permanent_failure():
 
     assert len(attempts) == 1
     await supervisor.close()
+
+
+def test_should_start_retrieval_worker_respects_mode_and_embedding_flags():
+    assert should_start_retrieval_worker(
+        transport_name='jetstream',
+        nats_url='nats://nats:4222',
+        enable_embedded_worker=True,
+        worker_only_mode=False,
+    )
+    assert should_start_retrieval_worker(
+        transport_name='jetstream',
+        nats_url='nats://nats:4222',
+        enable_embedded_worker=False,
+        worker_only_mode=True,
+    )
+    assert not should_start_retrieval_worker(
+        transport_name='jetstream',
+        nats_url='nats://nats:4222',
+        enable_embedded_worker=False,
+        worker_only_mode=False,
+    )
+    assert not should_start_retrieval_worker(
+        transport_name='local',
+        nats_url='nats://nats:4222',
+        enable_embedded_worker=True,
+        worker_only_mode=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_run_ignores_nats_timeout_errors_between_fetches():
+    app = SimpleNamespace(state=SimpleNamespace())
+    worker = JetStreamRetrievalWorker(app, 'nats://nats:4222', 'instance-1')
+    worker._subscription = SimpleNamespace(fetch=AsyncMock(side_effect=[NatsTimeoutError(), asyncio.CancelledError()]))
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker._run()
+
+    assert worker._subscription.fetch.await_count == 2
