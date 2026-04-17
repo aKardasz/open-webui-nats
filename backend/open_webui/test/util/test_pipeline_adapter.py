@@ -47,6 +47,12 @@ class FakeSession:
     def post(self, *_args, **_kwargs):
         return self._response
 
+    def get(self, *_args, **_kwargs):
+        return self._response
+
+    def delete(self, *_args, **_kwargs):
+        return self._response
+
 
 def _request():
     return SimpleNamespace(
@@ -96,3 +102,23 @@ async def test_http_pipeline_adapter_raises_pipeline_adapter_error_on_http_error
 
     assert exc.value.status_code == 400
     assert exc.value.detail == {'detail': 'bad request'}
+
+
+@pytest.mark.asyncio
+async def test_http_pipeline_adapter_get_json_returns_payload():
+    adapter = HttpPipelineAdapter(_request())
+
+    with patch('open_webui.utils.pipeline_adapter.aiohttp.ClientSession', return_value=FakeSession(FakeResponse(payload={'items': []}))):
+        result = await adapter.get_json(0, 'pipelines')
+
+    assert result == {'items': []}
+
+
+@pytest.mark.asyncio
+async def test_http_pipeline_adapter_delete_json_returns_payload():
+    adapter = HttpPipelineAdapter(_request())
+
+    with patch('open_webui.utils.pipeline_adapter.aiohttp.ClientSession', return_value=FakeSession(FakeResponse(payload={'deleted': True}))):
+        result = await adapter.delete_json(0, 'pipelines/delete', {'id': 'pipe-1'})
+
+    assert result == {'deleted': True}
