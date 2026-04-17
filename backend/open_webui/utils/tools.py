@@ -54,7 +54,7 @@ from open_webui.env import (
     NATS_URL,
 )
 from open_webui.utils.headers import include_user_info_headers
-from open_webui.utils.runtime_registry import sync_runtime_registry
+from open_webui.utils.runtime_registry import annotate_runtime_service_metadata, sync_runtime_registry
 from open_webui.tools.builtin import (
     search_web,
     fetch_url,
@@ -800,6 +800,11 @@ async def set_tool_servers(request: Request):
         await request.app.state.redis.set('tool_servers', json.dumps(request.app.state.TOOL_SERVERS))
 
     await sync_runtime_registry(request.app, nats_url=NATS_URL)
+    request.app.state.TOOL_SERVERS = annotate_runtime_service_metadata(
+        request.app,
+        request.app.state.TOOL_SERVERS,
+        service_type='tool-executor',
+    )
 
     return request.app.state.TOOL_SERVERS
 
@@ -809,12 +814,18 @@ async def get_tool_servers(request: Request):
     if request.app.state.redis is not None:
         try:
             tool_servers = json.loads(await request.app.state.redis.get('tool_servers'))
-            request.app.state.TOOL_SERVERS = tool_servers
         except Exception as e:
             log.error(f'Error fetching tool_servers from Redis: {e}')
 
     if not tool_servers:
         tool_servers = await set_tool_servers(request)
+    else:
+        tool_servers = annotate_runtime_service_metadata(
+            request.app,
+            tool_servers,
+            service_type='tool-executor',
+        )
+        request.app.state.TOOL_SERVERS = tool_servers
 
     return tool_servers
 
@@ -937,6 +948,11 @@ async def set_terminal_servers(request: Request):
         await request.app.state.redis.set('terminal_servers', json.dumps(request.app.state.TERMINAL_SERVERS))
 
     await sync_runtime_registry(request.app, nats_url=NATS_URL)
+    request.app.state.TERMINAL_SERVERS = annotate_runtime_service_metadata(
+        request.app,
+        request.app.state.TERMINAL_SERVERS,
+        service_type='terminal',
+    )
 
     return request.app.state.TERMINAL_SERVERS
 
@@ -947,12 +963,18 @@ async def get_terminal_servers(request: Request):
     if request.app.state.redis is not None:
         try:
             terminal_servers = json.loads(await request.app.state.redis.get('terminal_servers'))
-            request.app.state.TERMINAL_SERVERS = terminal_servers
         except Exception as e:
             log.error(f'Error fetching terminal_servers from Redis: {e}')
 
     if not terminal_servers:
         terminal_servers = await set_terminal_servers(request)
+    else:
+        terminal_servers = annotate_runtime_service_metadata(
+            request.app,
+            terminal_servers,
+            service_type='terminal',
+        )
+        request.app.state.TERMINAL_SERVERS = terminal_servers
 
     return terminal_servers
 

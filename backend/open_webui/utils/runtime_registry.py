@@ -10,6 +10,7 @@ log = logging.getLogger(__name__)
 REGISTRY_BUCKET = 'owui_registry'
 ROUTING_BUCKET = 'owui_routing'
 FEATURE_FLAGS_BUCKET = 'owui_feature_flags'
+DEFAULT_RUNTIME_REGISTRY_FRESHNESS_SECONDS = 120
 
 
 def build_runtime_service_records(
@@ -91,6 +92,44 @@ def get_runtime_service_records(
     if freshness_seconds is not None:
         records = [record for record in records if is_runtime_service_record_fresh(record, freshness_seconds, now=now)]
     return records
+
+
+def annotate_runtime_service_metadata(
+    app,
+    servers: List[Dict[str, Any]],
+    *,
+    service_type: str,
+    freshness_seconds: int = DEFAULT_RUNTIME_REGISTRY_FRESHNESS_SECONDS,
+    now: datetime | None = None,
+) -> List[Dict[str, Any]]:
+    prefix = f'{service_type}.'
+    registry = {
+        record['service_id']: record
+        for record in get_runtime_service_records(app, require_healthy=False)
+        if record.get('service_id', '').startswith(prefix)
+    }
+
+    annotated = []
+    for server in servers or []:
+        server_id = server.get('id') or server.get('name') or 'unknown'
+        service_id = f'{service_type}.{server_id}'
+        record = registry.get(service_id)
+        enriched = {
+            **server,
+            'runtime': {
+                'service_id': service_id,
+                'registered': record is not None,
+                'fresh': is_runtime_service_record_fresh(record, freshness_seconds, now=now) if record else False,
+                'status': record.get('status') if record else None,
+                'observed_at': record.get('observed_at') if record else None,
+                'instance_id': record.get('instance_id') if record else None,
+                'version': record.get('version') if record else None,
+                'subjects': record.get('subjects') if record else None,
+            },
+        }
+        annotated.append(enriched)
+
+    return annotated
 
 
 def is_runtime_service_record_fresh(

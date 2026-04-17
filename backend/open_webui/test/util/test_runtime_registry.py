@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from open_webui.utils.runtime_registry import (
+    DEFAULT_RUNTIME_REGISTRY_FRESHNESS_SECONDS,
+    annotate_runtime_service_metadata,
     build_runtime_service_records,
     get_runtime_service_records,
     is_runtime_service_record_fresh,
@@ -173,4 +175,61 @@ def test_get_runtime_service_records_filters_by_service_type_health_and_freshnes
             'status': 'healthy',
             'observed_at': '2026-04-17T18:59:45Z',
         }
+    ]
+
+
+def test_annotate_runtime_service_metadata_marks_registration_and_freshness():
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            RUNTIME_SERVICE_REGISTRY=[
+                {
+                    'service_id': 'terminal.term-1',
+                    'service_type': 'terminal',
+                    'instance_id': 'instance-1',
+                    'version': '1.0.0',
+                    'status': 'healthy',
+                    'subjects': ['owui.cmd.terminal.session.create'],
+                    'observed_at': '2026-04-17T18:59:45Z',
+                }
+            ]
+        )
+    )
+
+    annotated = annotate_runtime_service_metadata(
+        app,
+        [{'id': 'term-1', 'name': 'Terminal One'}, {'id': 'term-2', 'name': 'Terminal Two'}],
+        service_type='terminal',
+        freshness_seconds=DEFAULT_RUNTIME_REGISTRY_FRESHNESS_SECONDS,
+        now=datetime(2026, 4, 17, 19, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert annotated == [
+        {
+            'id': 'term-1',
+            'name': 'Terminal One',
+            'runtime': {
+                'service_id': 'terminal.term-1',
+                'registered': True,
+                'fresh': True,
+                'status': 'healthy',
+                'observed_at': '2026-04-17T18:59:45Z',
+                'instance_id': 'instance-1',
+                'version': '1.0.0',
+                'subjects': ['owui.cmd.terminal.session.create'],
+            },
+        },
+        {
+            'id': 'term-2',
+            'name': 'Terminal Two',
+            'runtime': {
+                'service_id': 'terminal.term-2',
+                'registered': False,
+                'fresh': False,
+                'status': None,
+                'observed_at': None,
+                'instance_id': None,
+                'version': None,
+                'subjects': None,
+            },
+        },
     ]
