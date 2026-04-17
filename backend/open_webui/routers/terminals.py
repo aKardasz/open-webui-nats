@@ -19,6 +19,7 @@ from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_connection_access
 from open_webui.models.groups import Groups
 from open_webui.models.users import Users
+from open_webui.utils.tools import get_terminal_servers as get_cached_terminal_servers
 from open_webui.utils.task_messaging import (
     TERMINAL_SESSION_ATTACHED_SUBJECT,
     TERMINAL_SESSION_CREATED_SUBJECT,
@@ -62,12 +63,21 @@ async def list_terminal_servers(request: Request, user=Depends(get_verified_user
     """Return terminal servers the authenticated user has access to."""
     connections = request.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
     user_group_ids = {group.id for group in Groups.get_groups_by_member_id(user.id)}
+    terminal_servers = {
+        server.get('id'): server
+        for server in await get_cached_terminal_servers(request)
+    }
 
     return [
         {
             'id': connection.get('id', ''),
             'url': connection.get('url', ''),
             'name': connection.get('name', ''),
+            **(
+                {'runtime': terminal_servers[connection.get('id')].get('runtime')}
+                if connection.get('id') in terminal_servers and terminal_servers[connection.get('id')].get('runtime')
+                else {}
+            ),
         }
         for connection in connections
         if connection.get('enabled', True) and has_connection_access(user, connection, user_group_ids)

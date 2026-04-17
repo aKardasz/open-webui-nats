@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 import pytest
 
-from open_webui.routers.terminals import ws_terminal
+from open_webui.routers.terminals import list_terminal_servers, ws_terminal
 
 
 class FakeWebSocket:
@@ -45,6 +45,58 @@ class FakeClientSession:
 
     def ws_connect(self, _url):
         return self._upstream
+
+
+@pytest.mark.asyncio
+async def test_list_terminal_servers_includes_runtime_metadata_when_available():
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(
+                    TERMINAL_SERVER_CONNECTIONS=[
+                        {'id': 'server-1', 'url': 'http://terminal.example', 'name': 'Terminal One', 'enabled': True}
+                    ]
+                )
+            )
+        )
+    )
+    user = SimpleNamespace(id='user-1', role='user')
+
+    with (
+        patch('open_webui.routers.terminals.Groups.get_groups_by_member_id', return_value=[]),
+        patch('open_webui.routers.terminals.has_connection_access', return_value=True),
+        patch(
+            'open_webui.routers.terminals.get_cached_terminal_servers',
+            AsyncMock(
+                return_value=[
+                    {
+                        'id': 'server-1',
+                        'runtime': {
+                            'service_id': 'terminal.server-1',
+                            'registered': True,
+                            'fresh': True,
+                            'status': 'healthy',
+                        },
+                    }
+                ]
+            ),
+        ),
+    ):
+        result = await list_terminal_servers(request, user)
+
+    assert result == [
+        {
+            'id': 'server-1',
+            'url': 'http://terminal.example',
+            'name': 'Terminal One',
+            'runtime': {
+                'service_id': 'terminal.server-1',
+                'registered': True,
+                'fresh': True,
+                'status': 'healthy',
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio
