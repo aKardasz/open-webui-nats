@@ -53,6 +53,9 @@ class FakeSession:
     def delete(self, *_args, **_kwargs):
         return self._response
 
+    def request(self, *_args, **_kwargs):
+        return self._response
+
 
 def _request():
     return SimpleNamespace(
