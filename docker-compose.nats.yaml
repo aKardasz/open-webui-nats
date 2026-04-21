@@ -21,17 +21,27 @@ services:
     restart: unless-stopped
 
   open-webui:
+    build:
+      args:
+        USE_SLIM: ${NATS_SMOKE_USE_SLIM-true}
     environment:
       - 'NATS_URL=nats://nats:4222'
+      - 'WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY-nats-smoke-secret}'
       - 'ENABLE_EMBEDDED_RETRIEVAL_WORKER=false'
+      - 'ENABLE_EMBEDDED_PIPELINE_RUNNER=false'
+      - 'ENABLE_EMBEDDED_TERMINAL_SERVICE=false'
     depends_on:
       nats:
         condition: service_healthy
 
   retrieval-worker:
+    healthcheck:
+      disable: true
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        USE_SLIM: ${NATS_SMOKE_USE_SLIM-true}
     image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-main}
     container_name: open-webui-retrieval-worker
     command: ["python", "-m", "open_webui", "retrieval-worker"]
@@ -40,11 +50,64 @@ services:
       - 'RETRIEVAL_TRANSPORT=jetstream'
       - 'ENABLE_EMBEDDED_RETRIEVAL_WORKER=true'
       - 'WORKER_ONLY_MODE=true'
-      - 'WEBUI_SECRET_KEY='
+      - 'WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY-nats-smoke-secret}'
     volumes:
       - open-webui:/app/backend/data
     depends_on:
       nats:
+        condition: service_healthy
+      open-webui:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pipeline-runner:
+    healthcheck:
+      disable: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USE_SLIM: ${NATS_SMOKE_USE_SLIM-true}
+    image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-main}
+    container_name: open-webui-pipeline-runner
+    command: ["python", "-m", "open_webui", "pipeline-runner"]
+    environment:
+      - 'NATS_URL=nats://nats:4222'
+      - 'PIPELINE_INTERNAL_TRANSPORT=nats'
+      - 'ENABLE_EMBEDDED_PIPELINE_RUNNER=true'
+      - 'PIPELINE_RUNNER_ONLY_MODE=true'
+      - 'WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY-nats-smoke-secret}'
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      nats:
+        condition: service_healthy
+      open-webui:
+        condition: service_healthy
+    restart: unless-stopped
+
+  terminal-service:
+    healthcheck:
+      disable: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USE_SLIM: ${NATS_SMOKE_USE_SLIM-true}
+    image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-main}
+    container_name: open-webui-terminal-service
+    command: ["python", "-m", "open_webui", "terminal-service"]
+    environment:
+      - 'NATS_URL=nats://nats:4222'
+      - 'ENABLE_EMBEDDED_TERMINAL_SERVICE=true'
+      - 'TERMINAL_SERVICE_ONLY_MODE=true'
+      - 'WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY-nats-smoke-secret}'
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      nats:
+        condition: service_healthy
+      open-webui:
         condition: service_healthy
     restart: unless-stopped
 

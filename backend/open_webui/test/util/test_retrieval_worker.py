@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from nats.errors import TimeoutError as NatsTimeoutError
-
-from open_webui.utils.retrieval_jobs import build_retrieval_job
+from open_webui.routers.files import get_file_process_status
+from open_webui.utils.retrieval_jobs import build_retrieval_job, build_retrieval_job_record
 from open_webui.utils.retrieval_worker import (
     JetStreamRetrievalWorker,
     publish_retrieval_job_sync,
@@ -174,3 +174,97 @@ async def test_worker_run_ignores_nats_timeout_errors_between_fetches():
         await worker._run()
 
     assert worker._subscription.fetch.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_redelivery_after_restart_preserves_completed_status_projection():
+    app = SimpleNamespace(state=SimpleNamespace())
+    user = SimpleNamespace(id='user-1', role='user')
+    retrieval_job = build_retrieval_job(
+        actor_id='user-1',
+        resource_id='file-1',
+        job_id='job-1',
+        payload={
+            'command_type': 'process_file',
+            'file_id': 'file-1',
+            'source': 'upload',
+            'processing_mode': 'background_task',
+            'delivery_mode': 'jetstream',
+        },
+    )
+    projected_state = {'status': 'pending'}
+
+    def current_file():
+        return SimpleNamespace(
+            id='file-1',
+            user_id='user-1',
+            data=dict(projected_state),
+        )
+
+    attempts = 0
+
+    def execute_side_effect(_request, job):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            projected_state.update(
+                {
+                    'status': 'failed',
+                    'retrieval_job': build_retrieval_job_record(
+                        job,
+                        status='failed',
+                        collection_name='file-file-1',
+                        error='boom',
+                    ),
+                    'error': 'boom',
+                }
+            )
+            raise RuntimeError('boom')
+
+        projected_state.update(
+            {
+                'status': 'completed',
+                'retrieval_job': build_retrieval_job_record(
+                    job,
+                    status='completed',
+                    collection_name='file-file-1',
+                    document_count=1,
+                ),
+            }
+        )
+        projected_state.pop('error', None)
+
+    async def run_job_inline(func, *args):
+        return func(*args)
+
+    first_message = SimpleNamespace(
+        data=json.dumps(retrieval_job).encode('utf-8'),
+        ack=AsyncMock(),
+        nak=AsyncMock(),
+    )
+    second_message = SimpleNamespace(
+        data=json.dumps(retrieval_job).encode('utf-8'),
+        ack=AsyncMock(),
+        nak=AsyncMock(),
+    )
+
+    first_worker = JetStreamRetrievalWorker(app, 'nats://nats:4222', 'instance-1')
+    second_worker = JetStreamRetrievalWorker(app, 'nats://nats:4222', 'instance-1')
+
+    with (
+        patch('open_webui.utils.retrieval_worker.asyncio.to_thread', side_effect=run_job_inline),
+        patch('open_webui.utils.retrieval_worker.execute_retrieval_job', side_effect=execute_side_effect),
+        patch('open_webui.routers.files.Files.get_file_by_id', side_effect=lambda *_args, **_kwargs: current_file()),
+    ):
+        await first_worker._handle_message(first_message)
+        await second_worker._handle_message(second_message)
+        status_payload = await get_file_process_status('file-1', stream=False, user=user, db=Mock())
+
+    first_message.ack.assert_not_awaited()
+    first_message.nak.assert_awaited_once()
+    second_message.ack.assert_awaited_once()
+    second_message.nak.assert_not_awaited()
+    assert status_payload == {
+        'status': 'completed',
+        'retrieval_job': projected_state['retrieval_job'],
+    }

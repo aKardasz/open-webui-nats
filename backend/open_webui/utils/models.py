@@ -37,6 +37,62 @@ logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 
 
+def get_module_execution_metadata(module) -> dict:
+    execution_mode = getattr(module, 'execution', None)
+    durable_stage = bool(getattr(module, 'durable_stage', False))
+    if durable_stage:
+        execution_mode = execution_mode or 'jetstream'
+
+    if execution_mode is None:
+        execution_mode = 'request_reply'
+
+    metadata = {'execution_mode': execution_mode}
+    if durable_stage:
+        metadata['durable_stage'] = True
+    return metadata
+
+
+def build_action_item(function, module, action: dict | None = None) -> dict:
+    action = action or {}
+    item = {
+        'id': f'{function.id}.{action["id"]}' if 'id' in action else function.id,
+        'name': action.get('name', f'{function.name} ({action["id"]})') if 'id' in action else function.name,
+        'description': function.meta.description,
+        'icon': action.get(
+            'icon_url',
+            function.meta.manifest.get('icon_url', None)
+            or getattr(module, 'icon_url', None)
+            or getattr(module, 'icon', None),
+        )
+        if action
+        else function.meta.manifest.get('icon_url', None)
+        or getattr(module, 'icon_url', None)
+        or getattr(module, 'icon', None),
+        **get_module_execution_metadata(module),
+    }
+    if item.get('execution_mode') in {'internal', 'jetstream'}:
+        item['internal_executor_id'] = function.id
+        if 'id' in action:
+            item['sub_action_id'] = action['id']
+    return item
+
+
+def build_filter_item(function, module) -> dict:
+    item = {
+        'id': function.id,
+        'name': function.name,
+        'description': function.meta.description,
+        'icon': function.meta.manifest.get('icon_url', None)
+        or getattr(module, 'icon_url', None)
+        or getattr(module, 'icon', None),
+        'has_user_valves': hasattr(module, 'UserValves'),
+        **get_module_execution_metadata(module),
+    }
+    if item.get('execution_mode') in {'internal', 'jetstream'}:
+        item['internal_executor_id'] = function.id
+    return item
+
+
 async def fetch_ollama_models(request: Request, user: UserModel = None):
     raw_ollama_models = await ollama.get_all_models(request, user=user)
     return [
@@ -177,28 +233,19 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
             if custom_model.id in existing_ids:
                 continue
 
-            owned_by = 'openai'
-            connection_type = None
-            pipe = None
-
             base_model = base_model_lookup.get(custom_model.base_model_id)
             if base_model is None:
                 base_model = base_model_lookup.get(custom_model.base_model_id.split(':')[0])
-            if base_model:
-                owned_by = base_model.get('owned_by', 'unknown')
-                if 'pipe' in base_model:
-                    pipe = base_model['pipe']
-                connection_type = base_model.get('connection_type', None)
+            inherited_runtime = get_inherited_runtime_fields(base_model)
 
             model = {
                 'id': f'{custom_model.id}',
                 'name': custom_model.name,
                 'object': 'model',
                 'created': custom_model.created_at,
-                'owned_by': owned_by,
-                'connection_type': connection_type,
+                'owned_by': inherited_runtime.pop('owned_by', 'openai'),
                 'preset': True,
-                **({'pipe': pipe} if pipe is not None else {}),
+                **inherited_runtime,
             }
 
             info = custom_model.model_dump()
@@ -230,45 +277,13 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
         actions = []
         if hasattr(module, 'actions'):
             actions = module.actions
-            return [
-                {
-                    'id': f'{function.id}.{action["id"]}',
-                    'name': action.get('name', f'{function.name} ({action["id"]})'),
-                    'description': function.meta.description,
-                    'icon': action.get(
-                        'icon_url',
-                        function.meta.manifest.get('icon_url', None)
-                        or getattr(module, 'icon_url', None)
-                        or getattr(module, 'icon', None),
-                    ),
-                }
-                for action in actions
-            ]
+            return [build_action_item(function, module, action) for action in actions]
         else:
-            return [
-                {
-                    'id': function.id,
-                    'name': function.name,
-                    'description': function.meta.description,
-                    'icon': function.meta.manifest.get('icon_url', None)
-                    or getattr(module, 'icon_url', None)
-                    or getattr(module, 'icon', None),
-                }
-            ]
+            return [build_action_item(function, module)]
 
     # Process filter_ids to get the filters
     def get_filter_items_from_module(function, module):
-        return [
-            {
-                'id': function.id,
-                'name': function.name,
-                'description': function.meta.description,
-                'icon': function.meta.manifest.get('icon_url', None)
-                or getattr(module, 'icon_url', None)
-                or getattr(module, 'icon', None),
-                'has_user_valves': hasattr(module, 'UserValves'),
-            }
-        ]
+        return [build_filter_item(function, module)]
 
     # Batch-prefetch all needed function records to avoid N+1 queries
     all_function_ids = set()
@@ -375,6 +390,30 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
         request.app.state.MODELS = models_dict
 
     return models
+
+
+def get_inherited_runtime_fields(base_model: dict | None) -> dict:
+    if not base_model:
+        return {}
+
+    inherited = {
+        'owned_by': base_model.get('owned_by', 'unknown'),
+    }
+
+    for field in ('connection_type', 'internal_executor_id'):
+        if base_model.get(field) is not None:
+            inherited[field] = base_model[field]
+
+    for field in ('pipe', 'pipeline'):
+        if field in base_model and base_model.get(field) is not None:
+            inherited[field] = copy.deepcopy(base_model[field])
+
+    pipeline = inherited.get('pipeline')
+    if inherited.get('connection_type') == 'internal' and isinstance(pipeline, dict):
+        pipeline['execution'] = pipeline.get('execution', 'internal')
+        inherited['execution_mode'] = pipeline['execution']
+
+    return inherited
 
 
 def check_model_access(user, model, db=None):

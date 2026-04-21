@@ -1,36 +1,231 @@
-# Autopilot Implementation Plan - NATS Migration
+# Autopilot Implementation Plan — Remaining Open WebUI NATS Migration
 
-## Phase status
+This plan supersedes the older retrieval-only autopilot implementation plan. It is intentionally scoped to the remaining work after reviewing the current branch state and verification evidence.
 
-- Expansion: complete for this run
-- Planning: complete for this slice
-- Execution: next
+## Program status at plan creation
 
-## Immediate execution slice
+- Branch: `nats-refactor`
+- Head observed: `17c39ea980`
+- Stage A retrieval topology: complete by automated proof.
+- Stage B: transitional implementation exists; needs live runtime proof, lifecycle/ownership hardening, and docs reconciliation before it should be called fully supported.
+- Stage C: deferred.
 
-1. Move retrieval transport-policy decisions into `submit_file_retrieval(...)` / helper code.
-2. Remove router-level `LocalRetrievalTransport()` hardcoding from `knowledge.py`.
-3. Preserve intentionally local inline maintenance behavior for knowledge reindex by expressing that policy in the submission boundary.
-4. Keep the app-selected transport as the default for normal retrieval submissions.
-5. Preserve retrieval job persistence and queued/started/completed/failed event contracts.
+Fresh verification during plan creation:
 
-## Follow-on slice after this one
+- `./.venv/Scripts/python.exe -m compileall backend/open_webui -q` — passed.
+- Focused NATS seam tests — `81 passed, 8 warnings`.
+- Broader NATS migration tests — `143 passed, 8 warnings`.
 
-1. Add a dedicated retrieval-worker entrypoint / runtime mode so JetStream workers can run outside the web lifespan.
-2. Update compose/runtime docs to support web + worker topology.
-3. Keep service extraction rollback-safe by preserving local fallback.
+## Execution principles
 
-## QA floor for the current slice
+1. Preserve default non-NATS behavior and all browser-facing contracts.
+2. Keep fallback paths until dedicated services have live runtime proof.
+3. Move one ownership boundary at a time: registry, terminal lifecycle, pipeline execution, then topology support.
+4. Treat docs as part of the implementation; stale docs are a migration risk.
+5. Every phase must end with targeted tests and an updated proof note.
 
-- `python -m compileall backend/open_webui`
-- targeted pytest for:
-  - `backend/open_webui/test/util/test_retrieval_submission.py`
-  - `backend/open_webui/test/util/test_knowledge_retrieval_submission.py`
-  - `backend/open_webui/test/util/test_retrieval_transport.py`
-- no frontend verification required unless frontend files change
+## Phase 0 — Reconcile planning artifacts and current-state docs
 
-## Validation floor for the current slice
+Goal:
+- Remove stale contradictions between older Stage A/Stage B planning language and the current implementation.
 
-- architect review on boundary shape and future extraction readiness
-- code review on regression risk and cohesion
-- security review focused on config and transport-policy surfaces
+Work:
+- Update `docs/architecture/nats/06-implemented-state-and-next-steps.md` so “Implemented”, “Transitional”, and “Not Yet Implemented” do not contradict each other.
+- Cross-link this plan from `.omx/plans/nats-next-actions-checklist.md` or replace the checklist’s immediate-next-slice section with this phase ordering.
+- Keep PRD/test-spec as historical baseline unless product scope changed.
+
+Acceptance criteria:
+- Docs clearly state: Stage A complete; Stage B transitional but not fully runtime-supported; Stage C deferred.
+- “Not yet implemented” lists only true gaps, not capabilities that now exist in code.
+
+Verification:
+- Documentation diff review.
+- No code tests required unless docs tooling exists.
+
+## Phase 1 — Prove the five-service Stage B topology live
+
+Goal:
+- Convert compose-shape proof into runtime proof for `web + nats + retrieval-worker + terminal-service + pipeline-runner`.
+
+Work:
+- Add or document a deterministic smoke command for the merged compose config.
+- Boot the NATS overlay with embedded modes disabled in `open-webui`.
+- Verify each service starts and registers/heartbeats:
+  - `retrieval-worker`
+  - `terminal-service.default`
+  - `pipeline-runner.default`
+- Exercise one retrieval job through the worker, one terminal lifecycle create/attach decision through the service seam, and one pipeline request through the runner path.
+- Capture failure/fallback checks by stopping `terminal-service` and `pipeline-runner` independently and proving the web tier falls back safely where designed.
+
+Likely touchpoints:
+- `docker-compose.nats.yaml`
+- `backend/open_webui/test/util/test_docker_compose_nats_overlay.py`
+- new smoke docs or scripts if needed, preferably under existing test/script conventions
+- `docs/architecture/nats/06-implemented-state-and-next-steps.md`
+
+Acceptance criteria:
+- The five-service topology starts from documented commands.
+- Runtime registry shows fresh records for terminal and pipeline services.
+- Retrieval worker handles a job outside the web process.
+- Terminal lifecycle and pipeline runner seams are exercised with NATS enabled.
+- Service removal/failure produces documented fallback or a clear unavailable response; it must not silently corrupt state.
+
+Verification:
+- Existing unit/contract floor:
+  - `./.venv/Scripts/python.exe -m pytest backend/open_webui/test/util/test_docker_compose_nats_overlay.py -q`
+- Runtime smoke evidence:
+  - merged compose config validation
+  - service health/log checks
+  - NATS KV/subject checks where practical
+  - one retrieval, terminal, and pipeline path exercised end to end
+
+## Phase 2 — Harden runtime registry ownership and health semantics
+
+Goal:
+- Make registry state reliable enough to support Stage B operational decisions.
+
+Work:
+- Clarify and enforce ownership separation:
+  - service-owned heartbeat keys are written only by the owning runtime/provider
+  - derived web routing snapshots are separate and may be regenerated by the web tier
+- Add tests that prevent web refresh/materialization from deleting or rewriting service-owned heartbeat records.
+- Ensure runtime records expose readiness and capability details consistently for terminal and pipeline runners.
+- Add operational stale-service behavior: stopped service ages out of route eligibility while config fallback remains available where intended.
+
+Likely touchpoints:
+- `backend/open_webui/utils/runtime_registry.py`
+- `backend/open_webui/utils/terminal_service.py`
+- `backend/open_webui/utils/pipeline_runner.py`
+- `backend/open_webui/routers/configs.py`
+- `backend/open_webui/test/util/test_runtime_registry.py`
+- `backend/open_webui/test/util/test_runtime_registry_config.py`
+
+Acceptance criteria:
+- Service-owned and derived registry keys cannot conflict.
+- Fresh/stale/healthy/route-eligible semantics are deterministic in tests.
+- Admin runtime registry output is useful for diagnosing missing/stale terminal and pipeline services.
+- Registry absence/staleness does not break non-NATS or fallback paths.
+
+Verification:
+- `./.venv/Scripts/python.exe -m pytest backend/open_webui/test/util/test_runtime_registry.py backend/open_webui/test/util/test_runtime_registry_config.py -q`
+- Add/extend tests for ownership and stale-service scenarios.
+
+## Phase 3 — Move more terminal lifecycle authority into `terminal-service`
+
+Goal:
+- Make `terminal-service` the owner of terminal lifecycle decisions while keeping raw browser transport at the web edge.
+
+Work:
+- Extend service-owned session lifecycle beyond create/attach routing and closed-session rejection:
+  - session lease/idempotency for create requests
+  - reconnect/resume semantics for attach
+  - authoritative cleanup of failed/disconnected sessions
+  - consistent conflict responses for duplicate or mismatched session/server ids
+- Keep web router as auth/browser/proxy edge, but make it ask the service for lifecycle decisions whenever NATS/service is available.
+- Preserve local config fallback when service is unavailable unless the request is for a session known only to the service and cannot be safely resolved locally.
+- Add observability fields consistently in headers/events/listing payloads.
+
+Likely touchpoints:
+- `backend/open_webui/utils/terminal_service.py`
+- `backend/open_webui/routers/terminals.py`
+- `backend/open_webui/utils/task_messaging.py` if event contracts need extension
+- `backend/open_webui/test/util/test_terminal_service.py`
+- `backend/open_webui/test/util/test_terminal_eventing.py`
+
+Acceptance criteria:
+- Terminal lifecycle state can be reconstructed/validated by `terminal-service` without depending on ad hoc web-only state.
+- Service handles create, attach/resume, disconnect/fail, stale cleanup, and duplicate/conflict cases deterministically.
+- Web fallback remains safe and observable.
+- Raw WebSocket/HTTP proxy data transport remains unchanged.
+
+Verification:
+- `./.venv/Scripts/python.exe -m pytest backend/open_webui/test/util/test_terminal_service.py backend/open_webui/test/util/test_terminal_eventing.py -q`
+- Add tests for idempotent create, reconnect/resume, stale cleanup, and service-unavailable fallback.
+- Include a runtime smoke in Phase 1/6 for terminal lifecycle over NATS.
+
+## Phase 4 — Expand pipeline-runner ownership beyond the current narrow execution seam
+
+Goal:
+- Reduce dependence on the HTTP compatibility adapter for internal execution while keeping HTTP fallback for external/legacy pipelines.
+
+Work:
+- Define the boundary between:
+  - internal repo-native function/filter/pipe/action execution owned by `pipeline-runner`
+  - external compatibility execution still delegated to HTTP adapter
+- Expand runner support where currently narrow:
+  - richer pipeline stage envelope with trace/job ids, model/action/sub-action identity, user/context metadata, timeout/fallback hints, and durable reply contract
+  - streaming or explicitly non-streaming classification for runner-backed pipe/action paths
+  - clearer error taxonomy for no executor, bad payload, execution failure, timeout, and NAK/retryable failure
+- Extend durable JetStream stage integration into the higher-level paths that should be retryable, not just adapter-level publish/consume handling.
+- Add live runner proof for request/reply and durable stage lanes.
+
+Likely touchpoints:
+- `backend/open_webui/utils/pipeline_runner.py`
+- `backend/open_webui/utils/pipeline_adapter.py`
+- chat/function/action routing helpers touched by existing runner-backed paths
+- `backend/open_webui/test/util/test_pipeline_runner.py`
+- `backend/open_webui/test/util/test_pipeline_adapter.py`
+- `backend/open_webui/test/util/test_function_runner_request.py`
+- `backend/open_webui/test/util/test_action_runner_request.py`
+- `backend/open_webui/test/util/test_chat_internal_action_routing.py`
+
+Acceptance criteria:
+- Internal filter/pipe/action execution has an explicit runner-owned contract.
+- Durable-stage messages have a stable envelope and reply/error semantics.
+- HTTP compatibility remains the fallback for external pipelines and configured legacy behavior.
+- Runner-backed execution paths are visible in surfaced model/action/filter descriptors.
+
+Verification:
+- `./.venv/Scripts/python.exe -m pytest backend/open_webui/test/util/test_pipeline_adapter.py backend/open_webui/test/util/test_pipeline_runner.py backend/open_webui/test/util/test_function_runner_request.py backend/open_webui/test/util/test_action_runner_request.py backend/open_webui/test/util/test_chat_internal_action_routing.py -q`
+- Add tests for enriched stage envelope, error taxonomy, durable retry/NAK, and fallback boundaries.
+- Include a runtime smoke in Phase 1/6 for pipeline request/reply and durable-stage paths over NATS.
+
+## Phase 5 — Promote Stage B support in docs, tests, and operator guidance
+
+Goal:
+- Declare Stage B only after implementation and runtime proof agree.
+
+Work:
+- Update `docs/architecture/nats/05-service-first-roadmap.md` and `06-implemented-state-and-next-steps.md` with the final Stage B support matrix.
+- Add operator guidance for:
+  - enabling NATS overlay
+  - disabling embedded modes
+  - checking runtime registry health
+  - rollback to embedded/local paths
+  - expected behavior when a service disappears
+- Add CI-friendly verification commands for the supported test floor.
+
+Acceptance criteria:
+- Stage B support is documented as a verified topology, not just code scaffolding.
+- Fallback/rollback procedures are explicit.
+- Docs list remaining Stage C work separately.
+
+Verification:
+- Run the full NATS migration targeted test floor:
+  - `./.venv/Scripts/python.exe -m compileall backend/open_webui -q`
+  - `./.venv/Scripts/python.exe -m pytest backend/open_webui/test/util/test_task_messaging.py backend/open_webui/test/util/test_runtime_registry_config.py backend/open_webui/test/util/test_pipeline_adapter.py backend/open_webui/test/util/test_pipeline_runner.py backend/open_webui/test/util/test_terminal_eventing.py backend/open_webui/test/util/test_terminal_service.py backend/open_webui/test/util/test_runtime_registry.py backend/open_webui/test/util/test_file_process_status.py backend/open_webui/test/util/test_retrieval_service.py backend/open_webui/test/util/test_retrieval_jobs.py backend/open_webui/test/util/test_retrieval_worker.py backend/open_webui/test/util/test_retrieval_submission.py backend/open_webui/test/util/test_knowledge_retrieval_submission.py backend/open_webui/test/util/test_retrieval_transport.py backend/open_webui/test/util/test_docker_compose_nats_overlay.py backend/open_webui/test/util/test_function_descriptor_execution_mode.py backend/open_webui/test/util/test_function_models_execution_mode.py backend/open_webui/test/util/test_function_runner_request.py backend/open_webui/test/util/test_action_runner_request.py backend/open_webui/test/util/test_chat_internal_action_routing.py backend/open_webui/test/util/test_models_runtime_inheritance.py -q`
+  - live five-service smoke from Phase 1.
+
+## Phase 6 — Defer and plan Stage C separately
+
+Goal:
+- Prevent Stage C scope from blocking Stage B closure while preserving a clear next roadmap.
+
+Deferred work:
+- `artifact-worker`
+- `tool-executor` extraction behind safer policy/auth boundaries
+- stronger NATS isolation using accounts, users/creds, leaf nodes, or equivalent deployment-specific controls
+- any future Redis replacement for sessions/socket/Yjs, if it remains desirable
+
+Acceptance criteria:
+- Stage C is tracked as a new PRD/plan or explicit roadmap section.
+- Stage B completion is not held hostage by unimplemented Stage C isolation work.
+
+## Immediate next slice
+
+Start with Phase 0 + Phase 1 together:
+
+1. Reconcile `06-implemented-state-and-next-steps.md` so it stops listing implemented terminal/pipeline capabilities as missing.
+2. Add or document a live five-service smoke procedure.
+3. Run the smoke against `docker-compose.nats.yaml` and record evidence.
+4. Only then begin deeper terminal/pipeline ownership changes.

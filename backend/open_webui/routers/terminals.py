@@ -5,21 +5,20 @@ Routes:
   *    /{server_id}/{path:path}  — proxy request to terminal server
 """
 
+import asyncio
+import json
 import logging
 import posixpath
-import json
+from types import SimpleNamespace
 from urllib.parse import unquote
 
 import aiohttp
 from fastapi import APIRouter, Depends, Request, Response, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
-from starlette.background import BackgroundTask
-
-from open_webui.utils.auth import get_verified_user
-from open_webui.utils.access_control import has_connection_access
 from open_webui.models.groups import Groups
 from open_webui.models.users import Users
-from open_webui.utils.tools import get_terminal_servers as get_cached_terminal_servers
+from open_webui.utils.access_control import has_connection_access
+from open_webui.utils.auth import decode_token, get_verified_user, is_valid_token
 from open_webui.utils.task_messaging import (
     TERMINAL_SESSION_ATTACHED_SUBJECT,
     TERMINAL_SESSION_CREATED_SUBJECT,
@@ -28,6 +27,9 @@ from open_webui.utils.task_messaging import (
     build_domain_event,
     publish_app_event,
 )
+from open_webui.utils.terminal_service import request_terminal_lifecycle_control
+from open_webui.utils.tools import get_terminal_servers as get_cached_terminal_servers
+from starlette.background import BackgroundTask
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +60,85 @@ def _sanitize_proxy_path(path: str) -> str | None:
     return cleaned
 
 
+def _extract_terminal_session_id_from_path(path: str) -> str | None:
+    cleaned = _sanitize_proxy_path(path)
+    if not cleaned:
+        return None
+
+    parts = cleaned.rstrip('/').split('/')
+    if len(parts) >= 3 and parts[0] == 'api' and parts[1] == 'terminals':
+        session_id = parts[2]
+        return session_id or None
+    return None
+
+
+async def _resolve_terminal_connection(request: Request, user, server_id: str):
+    """Resolve the configured connection plus any registry-aware runtime route hint."""
+    connections = request.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
+    connection = next((c for c in connections if c.get('id') == server_id), None)
+
+    if connection is None:
+        return None
+
+    user_group_ids = {group.id for group in Groups.get_groups_by_member_id(user.id)}
+    has_access = has_connection_access(user, connection, user_group_ids)
+
+    terminal_servers = {
+        server.get('id'): server
+        for server in await get_cached_terminal_servers(request)
+    }
+    runtime_server = terminal_servers.get(server_id)
+    runtime = runtime_server.get('runtime') if runtime_server else None
+    route_source = 'runtime' if runtime and runtime.get('route_eligible') else 'config_fallback'
+    resolved_url = (
+        runtime_server.get('url')
+        if route_source == 'runtime' and runtime_server and runtime_server.get('url')
+        else connection.get('url')
+    )
+
+    return {
+        'connection': connection,
+        'has_access': has_access,
+        'runtime': runtime,
+        'route_source': route_source,
+        'resolved_url': (resolved_url or '').rstrip('/'),
+    }
+
+
+async def _resolve_terminal_lifecycle_connection(
+    request: Request,
+    user,
+    server_id: str,
+    *,
+    action: str,
+    session_id: str | None = None,
+):
+    resolved = await _resolve_terminal_connection(request, user, server_id)
+    if resolved is None or not resolved['has_access']:
+        return resolved
+
+    lifecycle = await request_terminal_lifecycle_control(
+        request.app,
+        server_id=server_id,
+        action=action,
+        session_id=session_id,
+    )
+    if lifecycle is not None:
+        if lifecycle.get('status') == 'error':
+            resolved['error_status'] = lifecycle.get('status_code', 502)
+            resolved['error_detail'] = lifecycle.get('detail') or 'Terminal lifecycle control request failed'
+            return resolved
+
+        lifecycle_data = lifecycle.get('data') or {}
+        if lifecycle_data.get('resolved_url'):
+            resolved['route_source'] = lifecycle_data.get('route_source', resolved['route_source'])
+            resolved['resolved_url'] = lifecycle_data['resolved_url'].rstrip('/')
+            resolved['session_status'] = lifecycle_data.get('session_status')
+            resolved['lifecycle_source'] = lifecycle_data.get('lifecycle_source', 'service_control')
+
+    return resolved
+
+
 @router.get('/')
 async def list_terminal_servers(request: Request, user=Depends(get_verified_user)):
     """Return terminal servers the authenticated user has access to."""
@@ -78,9 +159,35 @@ async def list_terminal_servers(request: Request, user=Depends(get_verified_user
                 if connection.get('id') in terminal_servers and terminal_servers[connection.get('id')].get('runtime')
                 else {}
             ),
+            **(
+                {'session_registry_entries': session_registry_entries}
+                if session_registry_entries is not None
+                else {}
+            ),
+            **(
+                {'active_session_count': active_session_count}
+                if active_session_count is not None
+                else {}
+            ),
+            **(
+                {'lifecycle_state': lifecycle_state}
+                if lifecycle_state is not None
+                else {}
+            ),
+            'route_source': (
+                'runtime'
+                if terminal_servers.get(connection.get('id'), {}).get('runtime', {}).get('route_eligible')
+                else 'config_fallback'
+            ),
         }
         for connection in connections
-        if connection.get('enabled', True) and has_connection_access(user, connection, user_group_ids)
+        if connection.get('enabled', True)
+        and has_connection_access(user, connection, user_group_ids)
+        for runtime in [terminal_servers.get(connection.get('id'), {}).get('runtime', {})]
+        for capabilities in [runtime.get('capabilities', {})]
+        for session_registry_entries in [capabilities.get('session_registry_entries')]
+        for active_session_count in [capabilities.get('active_session_count')]
+        for lifecycle_state in [capabilities.get('lifecycle_state')]
     ]
 
 
@@ -88,24 +195,34 @@ PROXY_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 
 
 @router.api_route('/{server_id}/{path:path}', methods=PROXY_METHODS)
-async def proxy_terminal(
+async def proxy_terminal(  # noqa: C901
     server_id: str,
     path: str,
     request: Request,
     user=Depends(get_verified_user),
 ):
     """Proxy a request to the admin terminal server identified by *server_id*."""
-    connections = request.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
-    connection = next((c for c in connections if c.get('id') == server_id), None)
-
-    if connection is None:
+    lifecycle_action = 'create' if request.method == 'POST' and path == 'api/terminals' else 'attach'
+    lifecycle_session_id = None if lifecycle_action == 'create' else _extract_terminal_session_id_from_path(path)
+    resolved = await _resolve_terminal_lifecycle_connection(
+        request,
+        user,
+        server_id,
+        action=lifecycle_action,
+        session_id=lifecycle_session_id,
+    )
+    if resolved is None:
         return JSONResponse({'error': f"Terminal server '{server_id}' not found"}, status_code=404)
-
-    user_group_ids = {group.id for group in Groups.get_groups_by_member_id(user.id)}
-    if not has_connection_access(user, connection, user_group_ids):
+    if not resolved['has_access']:
         return JSONResponse({'error': 'Access denied'}, status_code=403)
+    if resolved.get('error_detail'):
+        return JSONResponse({'error': resolved['error_detail']}, status_code=resolved.get('error_status', 502))
 
-    base_url = (connection.get('url') or '').rstrip('/')
+    connection = resolved['connection']
+    route_source = resolved['route_source']
+    base_url = resolved['resolved_url']
+    lifecycle_source = resolved.get('lifecycle_source')
+    session_status = resolved.get('session_status')
     if not base_url:
         return JSONResponse({'error': 'Terminal server URL not configured'}, status_code=503)
 
@@ -164,6 +281,11 @@ async def proxy_terminal(
             for key, value in upstream_response.headers.items()
             if key.lower() not in STRIPPED_RESPONSE_HEADERS
         }
+        filtered_headers['X-OWUI-Terminal-Route'] = route_source
+        if resolved.get('lifecycle_source'):
+            filtered_headers['X-OWUI-Terminal-Lifecycle'] = resolved['lifecycle_source']
+        if resolved.get('session_status'):
+            filtered_headers['X-OWUI-Terminal-Session-Status'] = str(resolved['session_status'])
 
         # Stream binary responses directly
         if any(t in upstream_content_type for t in STREAMING_CONTENT_TYPES):
@@ -206,6 +328,10 @@ async def proxy_terminal(
                                 'session_id': session_id,
                                 'server_id': server_id,
                                 'status': 'created',
+                                'route_source': route_source,
+                                'resolved_url': base_url,
+                                'lifecycle_source': lifecycle_source,
+                                'session_status': session_status,
                             },
                         ),
                     )
@@ -223,7 +349,7 @@ async def proxy_terminal(
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
+async def _resolve_authenticated_connection(ws: WebSocket, server_id: str, session_id: str):
     """Authenticate a WebSocket via first-message auth and resolve the terminal server.
 
     The client must send ``{"type": "auth", "token": "<jwt>"}`` as its first
@@ -232,10 +358,6 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
     Returns ``(user, connection)`` on success, or ``None`` after closing *ws*
     with an appropriate error code.
     """
-    import asyncio
-    import json
-    from open_webui.utils.auth import decode_token, is_valid_token
-
     # First-message authentication
     try:
         raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
@@ -255,7 +377,7 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
         if user is None:
             await ws.close(code=4001, reason='User not found')
             return None
-    except (asyncio.TimeoutError, json.JSONDecodeError):
+    except (TimeoutError, json.JSONDecodeError):
         await ws.close(code=4001, reason='Auth timeout or invalid payload')
         return None
     except Exception:
@@ -263,23 +385,35 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
         return None
 
     # Resolve terminal server
-    connections = ws.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
-    connection = next((c for c in connections if c.get('id') == server_id), None)
-
-    if connection is None:
+    resolved = await _resolve_terminal_lifecycle_connection(
+        SimpleNamespace(app=ws.app),
+        user,
+        server_id,
+        action='attach',
+        session_id=session_id,
+    )
+    if resolved is None:
         await ws.close(code=4004, reason='Terminal server not found')
         return None
-
-    user_group_ids = {group.id for group in Groups.get_groups_by_member_id(user.id)}
-    if not has_connection_access(user, connection, user_group_ids):
+    if not resolved['has_access']:
         await ws.close(code=4003, reason='Access denied')
         return None
+    if resolved.get('error_detail'):
+        await ws.close(code=4008, reason=resolved['error_detail'])
+        return None
 
-    return user, connection
+    return (
+        user,
+        resolved['connection'],
+        resolved['route_source'],
+        resolved['resolved_url'],
+        resolved.get('lifecycle_source'),
+        resolved.get('session_status'),
+    )
 
 
 @router.websocket('/{server_id}/api/terminals/{session_id}')
-async def ws_terminal(
+async def ws_terminal(  # noqa: C901
     ws: WebSocket,
     server_id: str,
     session_id: str,
@@ -292,12 +426,11 @@ async def ws_terminal(
     """
     await ws.accept()
 
-    result = await _resolve_authenticated_connection(ws, server_id)
+    result = await _resolve_authenticated_connection(ws, server_id, session_id)
     if result is None:
         return
-    user, connection = result
+    user, connection, route_source, base_url, lifecycle_source, session_status = result
 
-    base_url = (connection.get('url') or '').rstrip('/')
     if not base_url:
         await ws.close(code=4003, reason='Terminal server URL not configured')
         return
@@ -364,6 +497,10 @@ async def ws_terminal(
                                             'session_id': session_id,
                                             'server_id': server_id,
                                             'status': 'attached',
+                                            'route_source': route_source,
+                                            'resolved_url': base_url,
+                                            'lifecycle_source': lifecycle_source,
+                                            'session_status': session_status,
                                         },
                                     ),
                                 )
@@ -381,6 +518,10 @@ async def ws_terminal(
                                             'session_id': session_id,
                                             'server_id': server_id,
                                             'status': 'attached',
+                                            'route_source': route_source,
+                                            'resolved_url': base_url,
+                                            'lifecycle_source': lifecycle_source,
+                                            'session_status': session_status,
                                         },
                                     ),
                                 )
@@ -411,6 +552,10 @@ async def ws_terminal(
                     'server_id': server_id,
                     'status': 'failed',
                     'error_code': 'terminal_proxy_failed',
+                    'route_source': route_source,
+                    'resolved_url': base_url,
+                    'lifecycle_source': lifecycle_source,
+                    'session_status': session_status,
                 },
             ),
         )
@@ -428,6 +573,10 @@ async def ws_terminal(
                         'session_id': session_id,
                         'server_id': server_id,
                         'status': 'disconnected',
+                        'route_source': route_source,
+                        'resolved_url': base_url,
+                        'lifecycle_source': lifecycle_source,
+                        'session_status': session_status,
                     },
                 ),
             )

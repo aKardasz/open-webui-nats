@@ -18,3 +18,15 @@ uploads
 **/*.db
 _test
 backend/data/*
+# Local development/runtime artifacts that should never be sent to Docker build context
+.venv
+.omx
+.tmp
+.tmp-*
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.svelte-kit
+build
+worker-stdout.log
+worker-stderr.log

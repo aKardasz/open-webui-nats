@@ -3,6 +3,7 @@ import sys
 import inspect
 import json
 import asyncio
+from uuid import uuid4
 
 from pydantic import BaseModel
 from typing import AsyncGenerator, Generator, Iterator
@@ -36,7 +37,7 @@ from open_webui.utils.plugin import (
 )
 from open_webui.utils.tools import get_tools
 
-from open_webui.env import GLOBAL_LOG_LEVEL
+from open_webui.env import GLOBAL_LOG_LEVEL, NATS_CONNECT_TIMEOUT, NATS_NAME
 
 from open_webui.utils.misc import (
     add_or_update_system_message,
@@ -52,6 +53,7 @@ from open_webui.utils.payload import (
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+PIPELINE_STAGE_JOB_SUBJECT = 'owui.cmd.pipeline.stage.run'
 
 
 def get_function_module_by_id(request: Request, pipe_id: str):
@@ -111,7 +113,7 @@ async def get_function_models(request):
                     if hasattr(function_module, 'name'):
                         sub_pipe_name = f'{function_module.name}{sub_pipe_name}'
 
-                    pipe_flag = {'type': pipe.type}
+                    pipe_flag = build_pipe_flag(function_module, pipe.type)
 
                     pipe_models.append(
                         {
@@ -120,12 +122,15 @@ async def get_function_models(request):
                             'object': 'model',
                             'created': pipe.created_at,
                             'owned_by': 'openai',
+                            'connection_type': 'internal',
+                            'internal_executor_id': pipe.id,
+                            'execution_mode': pipe_flag.get('execution', 'request_reply'),
                             'pipe': pipe_flag,
                             'has_user_valves': has_user_valves,
                         }
                     )
             else:
-                pipe_flag = {'type': 'pipe'}
+                pipe_flag = build_pipe_flag(function_module, 'pipe')
 
                 log.debug(
                     f"get_function_models: function '{pipe.id}' is a single pipe {{ 'id': {pipe.id}, 'name': {pipe.name} }}"
@@ -138,6 +143,9 @@ async def get_function_models(request):
                         'object': 'model',
                         'created': pipe.created_at,
                         'owned_by': 'openai',
+                        'connection_type': 'internal',
+                        'internal_executor_id': pipe.id,
+                        'execution_mode': pipe_flag.get('execution', 'request_reply'),
                         'pipe': pipe_flag,
                         'has_user_valves': has_user_valves,
                     }
@@ -147,6 +155,89 @@ async def get_function_models(request):
             continue
 
     return pipe_models
+
+
+def build_pipe_flag(function_module, pipe_type: str) -> dict:
+    pipe_flag = {'type': pipe_type}
+    execution = getattr(function_module, 'execution', None)
+    durable_stage = getattr(function_module, 'durable_stage', None)
+    if execution:
+        pipe_flag['execution'] = execution
+    if durable_stage:
+        pipe_flag['durable_stage'] = True
+        pipe_flag.setdefault('execution', 'jetstream')
+    return pipe_flag
+
+
+def is_durable_pipe_model(model: dict) -> bool:
+    pipe_meta = model.get('pipe') or {}
+    return pipe_meta.get('execution') == 'jetstream' or bool(pipe_meta.get('durable_stage'))
+
+
+async def request_function_chat_completion_via_runner(request, form_data, user, model):
+    nats_url = getattr(request.app.state.config, 'NATS_URL', None)
+    if not nats_url:
+        raise RuntimeError('NATS_URL is not configured')
+
+    import nats
+
+    pipe_id = form_data['model'].split('.', 1)[0]
+    pipe_meta = model.get('pipe', {'type': 'pipe'})
+    envelope = {
+        'trace_id': f'trace_pipe_{pipe_id}',
+        'payload_version': 'v1',
+        'payload': {
+            'pipeline_id': form_data['model'],
+            'pipeline': {
+                'id': form_data['model'],
+                'connection_type': 'internal',
+                'internal_executor_id': model.get('internal_executor_id', pipe_id),
+                'pipe': pipe_meta,
+            },
+            'stage': 'pipe',
+            'user': {
+                'id': user.id,
+                'name': getattr(user, 'name', None),
+                'email': getattr(user, 'email', None),
+                'role': getattr(user, 'role', None),
+            },
+            'body': form_data,
+        },
+    }
+
+    servers = [server.strip() for server in nats_url.split(',') if server.strip()]
+    nc = await nats.connect(
+        servers=servers,
+        name=f'open-webui-function-pipe-{getattr(request.app.state, "instance_id", "runtime")}',
+        connect_timeout=NATS_CONNECT_TIMEOUT,
+    )
+    try:
+        timeout = getattr(request.app.state.config, 'PIPELINE_NATS_REQUEST_TIMEOUT', 10.0)
+        if is_durable_pipe_model(model):
+            reply_subject = f'owui.reply.pipeline.stage.{uuid4().hex}'
+            subscription = await nc.subscribe(reply_subject)
+            await nc.jetstream().publish(
+                PIPELINE_STAGE_JOB_SUBJECT,
+                json.dumps({**envelope, 'reply_subject': reply_subject}).encode('utf-8'),
+            )
+            response = await subscription.next_msg(timeout=timeout)
+            await subscription.unsubscribe()
+        else:
+            response = await nc.request(
+                getattr(request.app.state.config, 'PIPELINE_NATS_SUBJECT', 'owui.cmd.pipeline.run'),
+                json.dumps(envelope).encode('utf-8'),
+                timeout=timeout,
+            )
+        payload = json.loads(response.data.decode('utf-8'))
+        if payload.get('status') != 'ok':
+            raise RuntimeError(payload.get('detail') or 'Internal pipe execution failed')
+        data = payload.get('data') or {}
+        body = data.get('body')
+        if not isinstance(body, dict):
+            raise RuntimeError('Internal pipe execution returned invalid payload')
+        return body
+    finally:
+        await nc.drain()
 
 
 async def generate_function_chat_completion(request, form_data, user, models: dict = {}):

@@ -21,7 +21,7 @@ from open_webui.socket.main import (
     get_event_call,
     get_event_emitter,
 )
-from open_webui.functions import generate_function_chat_completion
+from open_webui.functions import generate_function_chat_completion, request_function_chat_completion_via_runner
 
 from open_webui.routers.openai import (
     generate_chat_completion as generate_openai_chat_completion,
@@ -273,6 +273,11 @@ async def generate_chat_completion(
 
         if model.get('pipe'):
             # Below does not require bypass_filter because this is the only route the uses this function and it is already bypassing the filter
+            if model.get('connection_type') == 'internal' and not form_data.get('stream'):
+                try:
+                    return await request_function_chat_completion_via_runner(request, form_data, user, model)
+                except Exception as e:
+                    log.warning('Falling back to direct internal pipe execution after runner failure: %s', e)
             return await generate_function_chat_completion(request, form_data, user=user, models=models)
         if model.get('owned_by') == 'ollama':
             # Using /ollama/api/chat endpoint

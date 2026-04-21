@@ -12,7 +12,7 @@ import re
 from uuid import uuid4
 
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from urllib.parse import urlencode, parse_qs, urlparse
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -463,6 +463,7 @@ from open_webui.config import (
     AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE,
     AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH,
     AppConfig,
+    PersistentConfig,
     reset_config,
 )
 from open_webui.env import (
@@ -478,6 +479,16 @@ from open_webui.env import (
     REDIS_SENTINEL_HOSTS,
     REDIS_SENTINEL_PORT,
     NATS_URL,
+    PIPELINE_INTERNAL_TRANSPORT,
+    PIPELINE_NATS_REQUEST_TIMEOUT,
+    PIPELINE_NATS_SUBJECT,
+    ENABLE_EMBEDDED_PIPELINE_RUNNER,
+    PIPELINE_RUNNER_ONLY_MODE,
+    ENABLE_EMBEDDED_TERMINAL_SERVICE,
+    TERMINAL_SERVICE_ONLY_MODE,
+    TERMINAL_CONTROL_REQUEST_TIMEOUT,
+    TERMINAL_SESSION_REGISTRY_TTL_SECONDS,
+    RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     ENABLE_EMBEDDED_RETRIEVAL_WORKER,
     RETRIEVAL_TRANSPORT,
     WORKER_ONLY_MODE,
@@ -537,6 +548,9 @@ from open_webui.utils.middleware import (
 from open_webui.utils.tools import set_tool_servers, set_terminal_servers
 from open_webui.utils.retrieval_worker import should_start_retrieval_worker, start_retrieval_worker_with_retry
 from open_webui.utils.retrieval_transport import build_retrieval_transport
+from open_webui.utils.pipeline_runner import should_start_pipeline_runner, start_pipeline_runner_with_retry
+from open_webui.utils.terminal_service import should_start_terminal_service, start_terminal_service_with_retry
+from open_webui.utils.runtime_registry import periodic_runtime_registry_heartbeat
 
 from open_webui.utils.auth import (
     get_license_data,
@@ -655,6 +669,22 @@ async def lifespan(app: FastAPI):
     ):
         app.state.retrieval_worker = await start_retrieval_worker_with_retry(app, NATS_URL)
 
+    if should_start_pipeline_runner(
+        transport_name=PIPELINE_INTERNAL_TRANSPORT,
+        nats_url=NATS_URL,
+        enable_embedded_runner=ENABLE_EMBEDDED_PIPELINE_RUNNER,
+        pipeline_runner_only_mode=PIPELINE_RUNNER_ONLY_MODE,
+    ):
+        app.state.pipeline_runner = await start_pipeline_runner_with_retry(app, NATS_URL)
+
+    if should_start_terminal_service(
+        terminal_connections=app.state.config.TERMINAL_SERVER_CONNECTIONS or [],
+        nats_url=NATS_URL,
+        enable_embedded_service=ENABLE_EMBEDDED_TERMINAL_SERVICE,
+        terminal_service_only_mode=TERMINAL_SERVICE_ONLY_MODE,
+    ):
+        app.state.terminal_service = await start_terminal_service_with_retry(app, NATS_URL)
+
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
@@ -717,8 +747,26 @@ async def lifespan(app: FastAPI):
                 log.info('Initializing terminal servers...')
                 await set_terminal_servers(mock_request)
                 log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
+
         except Exception as e:
             log.warning(f'Failed to initialize tool/terminal servers at startup: {e}')
+
+    if (
+        NATS_URL
+        and not hasattr(app.state, 'runtime_registry_heartbeat_task')
+        and (
+            len(getattr(app.state, 'TOOL_SERVERS', []) or []) > 0
+            or len(getattr(app.state, 'TERMINAL_SERVERS', []) or []) > 0
+            or len(getattr(app.state, 'RUNTIME_SERVICE_RECORD_PROVIDERS', []) or []) > 0
+        )
+    ):
+        app.state.runtime_registry_heartbeat_task = asyncio.create_task(
+            periodic_runtime_registry_heartbeat(
+                app,
+                nats_url=NATS_URL,
+                heartbeat_interval_seconds=RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
+            )
+        )
 
     if WORKER_ONLY_MODE:
         log.info('Running in worker-only mode; skipped web-tier startup warmup tasks.')
@@ -730,6 +778,17 @@ async def lifespan(app: FastAPI):
 
     if getattr(app.state, 'retrieval_worker', None) is not None:
         await app.state.retrieval_worker.close()
+
+    if getattr(app.state, 'pipeline_runner', None) is not None:
+        await app.state.pipeline_runner.close()
+
+    if getattr(app.state, 'terminal_service', None) is not None:
+        await app.state.terminal_service.close()
+
+    if hasattr(app.state, 'runtime_registry_heartbeat_task'):
+        app.state.runtime_registry_heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await app.state.runtime_registry_heartbeat_task
 
     if hasattr(app.state, 'task_command_listener'):
         app.state.task_command_listener.cancel()
@@ -805,6 +864,41 @@ app.state.config.OPENAI_API_KEYS = OPENAI_API_KEYS
 app.state.config.OPENAI_API_CONFIGS = OPENAI_API_CONFIGS
 
 app.state.OPENAI_MODELS = {}
+app.state.PIPELINE_FILTER_EXECUTORS = {}
+app.state.pipeline_filter_executor = None
+
+########################################
+#
+# PIPELINES
+#
+########################################
+
+app.state.config.NATS_URL = PersistentConfig('NATS_URL', 'nats.url', NATS_URL)
+app.state.config.PIPELINE_INTERNAL_TRANSPORT = PersistentConfig(
+    'PIPELINE_INTERNAL_TRANSPORT',
+    'nats.pipeline.internal_transport',
+    PIPELINE_INTERNAL_TRANSPORT,
+)
+app.state.config.PIPELINE_NATS_SUBJECT = PersistentConfig(
+    'PIPELINE_NATS_SUBJECT',
+    'nats.pipeline.subject',
+    PIPELINE_NATS_SUBJECT,
+)
+app.state.config.PIPELINE_NATS_REQUEST_TIMEOUT = PersistentConfig(
+    'PIPELINE_NATS_REQUEST_TIMEOUT',
+    'nats.pipeline.request_timeout',
+    PIPELINE_NATS_REQUEST_TIMEOUT,
+)
+app.state.config.TERMINAL_CONTROL_REQUEST_TIMEOUT = PersistentConfig(
+    'TERMINAL_CONTROL_REQUEST_TIMEOUT',
+    'nats.terminal.control_request_timeout',
+    TERMINAL_CONTROL_REQUEST_TIMEOUT,
+)
+app.state.config.TERMINAL_SESSION_REGISTRY_TTL_SECONDS = PersistentConfig(
+    'TERMINAL_SESSION_REGISTRY_TTL_SECONDS',
+    'nats.terminal.session_registry_ttl_seconds',
+    TERMINAL_SESSION_REGISTRY_TTL_SECONDS,
+)
 
 ########################################
 #
@@ -815,6 +909,8 @@ app.state.OPENAI_MODELS = {}
 app.state.config.TOOL_SERVER_CONNECTIONS = TOOL_SERVER_CONNECTIONS
 app.state.TOOL_SERVERS = []
 app.state.RUNTIME_SERVICE_REGISTRY = []
+app.state.RUNTIME_SERVICE_DISABLED_TYPES = set()
+app.state.RUNTIME_SERVICE_RECORD_PROVIDERS = []
 
 ########################################
 #

@@ -142,7 +142,17 @@ ENV = os.environ.get('ENV', 'dev')
 FROM_INIT_PY = os.environ.get('FROM_INIT_PY', 'False').lower() == 'true'
 
 if FROM_INIT_PY:
-    PACKAGE_DATA = {'version': importlib.metadata.version('open-webui')}
+    try:
+        PACKAGE_DATA = {'version': importlib.metadata.version('open-webui')}
+    except importlib.metadata.PackageNotFoundError:
+        # Docker images copy the package source into /app/backend without installing
+        # it as a Python distribution, so worker-only `python -m open_webui ...`
+        # entrypoints must fall back to package.json metadata just like uvicorn
+        # imports do.
+        try:
+            PACKAGE_DATA = json.loads((BASE_DIR / 'package.json').read_text())
+        except Exception:
+            PACKAGE_DATA = {'version': '0.0.0'}
 else:
     try:
         PACKAGE_DATA = json.loads((BASE_DIR / 'package.json').read_text())
@@ -450,9 +460,66 @@ try:
 except ValueError:
     NATS_CONNECT_TIMEOUT = 2.0
 
+RUNTIME_REGISTRY_FRESHNESS_SECONDS = os.environ.get('RUNTIME_REGISTRY_FRESHNESS_SECONDS', '120')
+try:
+    RUNTIME_REGISTRY_FRESHNESS_SECONDS = int(RUNTIME_REGISTRY_FRESHNESS_SECONDS)
+    if RUNTIME_REGISTRY_FRESHNESS_SECONDS < 5:
+        RUNTIME_REGISTRY_FRESHNESS_SECONDS = 120
+except ValueError:
+    RUNTIME_REGISTRY_FRESHNESS_SECONDS = 120
+
+_runtime_registry_heartbeat_default = max(5, min(30, RUNTIME_REGISTRY_FRESHNESS_SECONDS // 2))
+RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS = os.environ.get(
+    'RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS',
+    str(_runtime_registry_heartbeat_default),
+)
+try:
+    RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS = int(RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS)
+    if RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS < 1:
+        RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS = _runtime_registry_heartbeat_default
+except ValueError:
+    RUNTIME_REGISTRY_HEARTBEAT_INTERVAL_SECONDS = _runtime_registry_heartbeat_default
+
 RETRIEVAL_TRANSPORT = os.environ.get('RETRIEVAL_TRANSPORT', 'local').strip().lower()
 if RETRIEVAL_TRANSPORT not in {'local', 'jetstream'}:
     RETRIEVAL_TRANSPORT = 'local'
+
+PIPELINE_INTERNAL_TRANSPORT = os.environ.get('PIPELINE_INTERNAL_TRANSPORT', 'http').strip().lower()
+if PIPELINE_INTERNAL_TRANSPORT not in {'http', 'nats'}:
+    PIPELINE_INTERNAL_TRANSPORT = 'http'
+
+PIPELINE_NATS_SUBJECT = os.environ.get('PIPELINE_NATS_SUBJECT', 'owui.cmd.pipeline.run').strip()
+if not PIPELINE_NATS_SUBJECT:
+    PIPELINE_NATS_SUBJECT = 'owui.cmd.pipeline.run'
+
+PIPELINE_NATS_REQUEST_TIMEOUT = os.environ.get('PIPELINE_NATS_REQUEST_TIMEOUT', '10')
+try:
+    PIPELINE_NATS_REQUEST_TIMEOUT = float(PIPELINE_NATS_REQUEST_TIMEOUT)
+    if PIPELINE_NATS_REQUEST_TIMEOUT <= 0:
+        PIPELINE_NATS_REQUEST_TIMEOUT = 10.0
+except ValueError:
+    PIPELINE_NATS_REQUEST_TIMEOUT = 10.0
+
+ENABLE_EMBEDDED_PIPELINE_RUNNER = os.environ.get('ENABLE_EMBEDDED_PIPELINE_RUNNER', 'true').lower() == 'true'
+PIPELINE_RUNNER_ONLY_MODE = os.environ.get('PIPELINE_RUNNER_ONLY_MODE', 'false').lower() == 'true'
+
+ENABLE_EMBEDDED_TERMINAL_SERVICE = os.environ.get('ENABLE_EMBEDDED_TERMINAL_SERVICE', 'true').lower() == 'true'
+TERMINAL_SERVICE_ONLY_MODE = os.environ.get('TERMINAL_SERVICE_ONLY_MODE', 'false').lower() == 'true'
+TERMINAL_CONTROL_REQUEST_TIMEOUT = os.environ.get('TERMINAL_CONTROL_REQUEST_TIMEOUT', '5')
+try:
+    TERMINAL_CONTROL_REQUEST_TIMEOUT = float(TERMINAL_CONTROL_REQUEST_TIMEOUT)
+    if TERMINAL_CONTROL_REQUEST_TIMEOUT <= 0:
+        TERMINAL_CONTROL_REQUEST_TIMEOUT = 5.0
+except ValueError:
+    TERMINAL_CONTROL_REQUEST_TIMEOUT = 5.0
+
+TERMINAL_SESSION_REGISTRY_TTL_SECONDS = os.environ.get('TERMINAL_SESSION_REGISTRY_TTL_SECONDS', '600')
+try:
+    TERMINAL_SESSION_REGISTRY_TTL_SECONDS = int(TERMINAL_SESSION_REGISTRY_TTL_SECONDS)
+    if TERMINAL_SESSION_REGISTRY_TTL_SECONDS < 30:
+        TERMINAL_SESSION_REGISTRY_TTL_SECONDS = 600
+except ValueError:
+    TERMINAL_SESSION_REGISTRY_TTL_SECONDS = 600
 
 ENABLE_EMBEDDED_RETRIEVAL_WORKER = os.environ.get('ENABLE_EMBEDDED_RETRIEVAL_WORKER', 'true').lower() == 'true'
 WORKER_ONLY_MODE = os.environ.get('WORKER_ONLY_MODE', 'false').lower() == 'true'

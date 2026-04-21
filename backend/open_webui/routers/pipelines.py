@@ -1,31 +1,22 @@
+import logging
+import os
+import shutil
+
 from fastapi import (
+    APIRouter,
     Depends,
-    FastAPI,
     File,
     Form,
     HTTPException,
     Request,
     UploadFile,
     status,
-    APIRouter,
 )
-import aiohttp
-import os
-import logging
-import shutil
-from pydantic import BaseModel
-from starlette.responses import FileResponse
-from typing import Optional
-
-from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
 from open_webui.config import CACHE_DIR
-from open_webui.constants import ERROR_MESSAGES
-from open_webui.utils.pipeline_adapter import HttpPipelineAdapter, PipelineAdapterError
-
-
 from open_webui.routers.openai import get_all_models_responses
-
 from open_webui.utils.auth import get_admin_user
+from open_webui.utils.pipeline_adapter import PipelineAdapterError, get_pipeline_adapter
+from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +51,7 @@ async def process_pipeline_inlet_filter(request, payload, user, models):
     model_id = payload['model']
     sorted_filters = get_sorted_filters(model_id, models)
     model = models[model_id]
-    adapter = HttpPipelineAdapter(request)
+    adapter = get_pipeline_adapter(request)
 
     if 'pipeline' in model:
         sorted_filters.append(model)
@@ -81,7 +72,7 @@ async def process_pipeline_outlet_filter(request, payload, user, models):
     model_id = payload['model']
     sorted_filters = get_sorted_filters(model_id, models)
     model = models[model_id]
-    adapter = HttpPipelineAdapter(request)
+    adapter = get_pipeline_adapter(request)
 
     if 'pipeline' in model:
         sorted_filters = [model] + sorted_filters
@@ -133,7 +124,7 @@ async def upload_pipeline(
 ):
     log.info(f'upload_pipeline: urlIdx={urlIdx}, filename={file.filename}')
     filename = os.path.basename(file.filename)
-    adapter = HttpPipelineAdapter(request)
+    adapter = get_pipeline_adapter(request)
 
     # Check if the uploaded file is a python file
     if not (filename and filename.endswith('.py')):
@@ -170,7 +161,7 @@ class AddPipelineForm(BaseModel):
 
 @router.post('/add')
 async def add_pipeline(request: Request, form_data: AddPipelineForm, user=Depends(get_admin_user)):
-    adapter = HttpPipelineAdapter(request)
+    adapter = get_pipeline_adapter(request)
     try:
         return await adapter.post_json(form_data.urlIdx, 'pipelines/add', {'url': form_data.url})
     except PipelineAdapterError as e:
@@ -187,7 +178,7 @@ class DeletePipelineForm(BaseModel):
 
 @router.delete('/delete')
 async def delete_pipeline(request: Request, form_data: DeletePipelineForm, user=Depends(get_admin_user)):
-    adapter = HttpPipelineAdapter(request)
+    adapter = get_pipeline_adapter(request)
     try:
         return await adapter.delete_json(form_data.urlIdx, 'pipelines/delete', {'id': form_data.id})
     except PipelineAdapterError as e:
@@ -198,8 +189,8 @@ async def delete_pipeline(request: Request, form_data: DeletePipelineForm, user=
 
 
 @router.get('/')
-async def get_pipelines(request: Request, urlIdx: Optional[int] = None, user=Depends(get_admin_user)):
-    adapter = HttpPipelineAdapter(request)
+async def get_pipelines(request: Request, urlIdx: int | None = None, user=Depends(get_admin_user)):
+    adapter = get_pipeline_adapter(request)
     try:
         return await adapter.get_json(urlIdx, 'pipelines')
     except PipelineAdapterError as e:
@@ -212,11 +203,11 @@ async def get_pipelines(request: Request, urlIdx: Optional[int] = None, user=Dep
 @router.get('/{pipeline_id}/valves')
 async def get_pipeline_valves(
     request: Request,
-    urlIdx: Optional[int],
+    urlIdx: int | None,
     pipeline_id: str,
     user=Depends(get_admin_user),
 ):
-    adapter = HttpPipelineAdapter(request)
+    adapter = get_pipeline_adapter(request)
     try:
         return await adapter.get_json(urlIdx, f'{pipeline_id}/valves')
     except PipelineAdapterError as e:
@@ -229,11 +220,11 @@ async def get_pipeline_valves(
 @router.get('/{pipeline_id}/valves/spec')
 async def get_pipeline_valves_spec(
     request: Request,
-    urlIdx: Optional[int],
+    urlIdx: int | None,
     pipeline_id: str,
     user=Depends(get_admin_user),
 ):
-    adapter = HttpPipelineAdapter(request)
+    adapter = get_pipeline_adapter(request)
     try:
         return await adapter.get_json(urlIdx, f'{pipeline_id}/valves/spec')
     except PipelineAdapterError as e:
@@ -246,12 +237,12 @@ async def get_pipeline_valves_spec(
 @router.post('/{pipeline_id}/valves/update')
 async def update_pipeline_valves(
     request: Request,
-    urlIdx: Optional[int],
+    urlIdx: int | None,
     pipeline_id: str,
     form_data: dict,
     user=Depends(get_admin_user),
 ):
-    adapter = HttpPipelineAdapter(request)
+    adapter = get_pipeline_adapter(request)
     try:
         return await adapter.post_json(urlIdx, f'{pipeline_id}/valves/update', {**form_data})
     except PipelineAdapterError as e:

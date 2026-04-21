@@ -72,6 +72,44 @@ log = logging.getLogger(__name__)
 ##########################################
 
 
+def apply_api_connection_metadata(model: dict, api_config: dict) -> dict:
+    connection_type = api_config.get('connection_type', 'external')
+    prefix_id = api_config.get('prefix_id', None)
+    tags = api_config.get('tags', [])
+    explicit_internal_executor_id = api_config.get('internal_executor_id')
+    configured_pipeline = api_config.get('pipeline')
+
+    if 'name' in model and model['name'] is None:
+        del model['name']
+
+    original_model_id = model.get('id', model.get('name', ''))
+    if prefix_id:
+        model['id'] = f'{prefix_id}.{original_model_id}'
+
+    if tags:
+        model['tags'] = tags
+
+    if isinstance(configured_pipeline, dict):
+        model['pipeline'] = {
+            **configured_pipeline,
+            **(model.get('pipeline') or {}),
+        }
+
+    if connection_type:
+        model['connection_type'] = connection_type
+
+    if connection_type == 'internal' and isinstance(model.get('pipeline'), dict):
+        model['pipeline'] = {
+            **model['pipeline'],
+            'execution': model['pipeline'].get('execution', 'internal'),
+        }
+        model['execution_mode'] = model['pipeline']['execution']
+        if explicit_internal_executor_id or original_model_id:
+            model['internal_executor_id'] = explicit_internal_executor_id or original_model_id
+
+    return model
+
+
 async def send_get_request(
     request: Request = None,
     url=None,
@@ -419,28 +457,13 @@ async def get_all_models_responses(request: Request, user: UserModel) -> list:
                 api_configs.get(url, {}),  # Legacy support
             )
 
-            connection_type = api_config.get('connection_type', 'external')
-            prefix_id = api_config.get('prefix_id', None)
-            tags = api_config.get('tags', [])
-
             model_list = response if isinstance(response, list) else response.get('data', [])
             if not isinstance(model_list, list):
                 # Catch non-list responses
                 model_list = []
 
             for model in model_list:
-                # Remove name key if its value is None #16689
-                if 'name' in model and model['name'] is None:
-                    del model['name']
-
-                if prefix_id:
-                    model['id'] = f'{prefix_id}.{model.get("id", model.get("name", ""))}'
-
-                if tags:
-                    model['tags'] = tags
-
-                if connection_type:
-                    model['connection_type'] = connection_type
+                apply_api_connection_metadata(model, api_config)
 
     log.debug(f'get_all_models:responses() {responses}')
     return responses

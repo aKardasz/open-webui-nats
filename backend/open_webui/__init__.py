@@ -102,7 +102,6 @@ def dev(
 
 @app.command(name='retrieval-worker')
 def retrieval_worker():
-    os.environ['FROM_INIT_PY'] = 'true'
     os.environ['WORKER_ONLY_MODE'] = 'true'
     os.environ.setdefault('RETRIEVAL_TRANSPORT', 'jetstream')
     os.environ.setdefault('ENABLE_EMBEDDED_RETRIEVAL_WORKER', 'true')
@@ -119,6 +118,57 @@ def retrieval_worker():
         async with app_instance.router.lifespan_context(app_instance):
             if getattr(app_instance.state, 'retrieval_worker', None) is None:
                 raise RuntimeError('Retrieval worker failed to start in worker-only mode.')
+
+            while True:
+                await asyncio.sleep(3600)
+
+    asyncio.run(_run())
+
+
+@app.command(name='pipeline-runner')
+def pipeline_runner():
+    os.environ['WORKER_ONLY_MODE'] = 'true'
+    os.environ['PIPELINE_RUNNER_ONLY_MODE'] = 'true'
+    os.environ.setdefault('PIPELINE_INTERNAL_TRANSPORT', 'nats')
+    os.environ.setdefault('ENABLE_EMBEDDED_PIPELINE_RUNNER', 'true')
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+    ensure_webui_secret_key()
+
+    async def _run():
+        import open_webui.main
+
+        app_instance = open_webui.main.app
+        async with app_instance.router.lifespan_context(app_instance):
+            if getattr(app_instance.state, 'pipeline_runner', None) is None:
+                raise RuntimeError('Pipeline runner failed to start in pipeline-runner mode.')
+
+            while True:
+                await asyncio.sleep(3600)
+
+    asyncio.run(_run())
+
+
+@app.command(name='terminal-service')
+def terminal_service():
+    os.environ['WORKER_ONLY_MODE'] = 'true'
+    os.environ['TERMINAL_SERVICE_ONLY_MODE'] = 'true'
+    os.environ.setdefault('ENABLE_EMBEDDED_TERMINAL_SERVICE', 'true')
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+    ensure_webui_secret_key()
+
+    async def _run():
+        import open_webui.main
+
+        app_instance = open_webui.main.app
+        async with app_instance.router.lifespan_context(app_instance):
+            if getattr(app_instance.state, 'terminal_service', None) is None:
+                raise RuntimeError('Terminal service failed to start in terminal-service mode.')
 
             while True:
                 await asyncio.sleep(3600)

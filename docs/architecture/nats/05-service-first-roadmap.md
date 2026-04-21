@@ -139,6 +139,11 @@ Use when:
 
 - the main goal is modular capability ownership and easier cross-container decomposition.
 
+Support gate:
+
+- Stage B is only considered supported when the five-service topology can be booted from documented compose commands, each extracted runtime publishes fresh registry records, and retrieval, terminal lifecycle, and pipeline execution paths have live smoke evidence with fallback behavior documented.
+- Unit tests that validate compose shape, adapter contracts, and service-owned records are necessary but not sufficient to promote Stage B without the live topology smoke.
+
 ### Stage C: Add Stronger Isolation
 
 Topology:
