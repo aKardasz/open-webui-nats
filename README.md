@@ -186,6 +186,28 @@ This adds a local NATS server with JetStream enabled and keeps the existing Redi
 
 The overlay now also includes a dedicated `retrieval-worker` service and disables embedded retrieval-worker startup in the `open-webui` service. The worker runs via `python -m open_webui retrieval-worker`, which starts the retrieval consumer in worker-only mode while the web process remains browser-facing.
 
+The current NATS port also includes upstream-derived automation and calendar backend slices plus transitional runner seams for internal execution. To enable those feature surfaces locally, add the following flags to your environment:
+
+```bash
+ENABLE_AUTOMATIONS=true
+ENABLE_CALENDAR=true
+```
+
+Optional automation limits:
+
+```bash
+AUTOMATION_MAX_COUNT=10
+AUTOMATION_MIN_INTERVAL=300
+```
+
+Startup prewarm is now bounded to avoid hanging readiness indefinitely on slower environments. You can tune that window with:
+
+```bash
+STARTUP_PREWARM_TIMEOUT_SECONDS=30
+```
+
+If you are running from Windows Python inside WSL, note that local HTTP probes from the WSL side may not always reach the Windows-bound listener even when the app is healthy. In that setup, prefer a Windows-side probe (`curl.exe` / PowerShell) when validating startup.
+
 ### Troubleshooting
 
 Encountering connection issues? Our [Open WebUI Documentation](https://docs.openwebui.com/troubleshooting/) has got you covered. For further assistance and to join our vibrant community, visit the [Open WebUI Discord](https://discord.gg/5rJgQTnV4s).

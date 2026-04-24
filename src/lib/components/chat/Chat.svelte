@@ -65,28 +65,30 @@
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
 
-	import {
-		archiveChatById,
-		createNewChat,
-		getAllTags,
-		getChatById,
-		getChatList,
-		getPinnedChatList,
-		getTagsById,
-		updateChatById,
-		updateChatFolderIdById
-	} from '$lib/apis/chats';
+		import {
+			archiveChatById,
+			createNewChat,
+			getAllTags,
+			getChatById,
+			getChatList,
+			getPinnedChatList,
+			markChatReadById,
+			getTagsById,
+			updateChatById,
+			updateChatFolderIdById
+		} from '$lib/apis/chats';
 	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
 	import { processWeb, processWebSearch, processYoutubeVideo } from '$lib/apis/retrieval';
 	import { getAndUpdateUserLocation, getUserSettings } from '$lib/apis/users';
 	import {
 		chatCompleted,
-		generateQueries,
-		chatAction,
-		generateMoACompletion,
-		stopTask,
-		getTaskIdsByChatId
-	} from '$lib/apis';
+			generateQueries,
+			chatAction,
+			generateMoACompletion,
+			stopTask,
+			getTaskIdsByChatId,
+			stopTasksByChatId
+		} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
 	import { uploadFile } from '$lib/apis/files';
 	import { createOpenAITextStream } from '$lib/apis/streaming';
@@ -156,8 +158,9 @@
 	let dragged = false;
 	let generationController = null;
 
-	let chat = null;
-	let tags = [];
+		let chat = null;
+		let tags = [];
+		let chatTasks = [];
 
 	let history = {
 		messages: {},
@@ -176,17 +179,22 @@
 		navigateHandler();
 	}
 
-	const navigateHandler = async () => {
-		loading = true;
+		const navigateHandler = async () => {
+			if ($chatId && $chatId !== chatIdProp && !$temporaryChatEnabled && !$chatId.startsWith('local:')) {
+				await markChatReadById(localStorage.token, $chatId).catch(() => null);
+			}
+
+			loading = true;
 
 		prompt = '';
 		messageInput?.setText('');
 
 		files = [];
 		selectedToolIds = [];
-		selectedFilterIds = [];
-		webSearchEnabled = false;
-		imageGenerationEnabled = false;
+			selectedFilterIds = [];
+			webSearchEnabled = false;
+			imageGenerationEnabled = false;
+			chatTasks = [];
 
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
@@ -197,9 +205,13 @@
 			loading = false;
 			window.setTimeout(() => scrollToBottom(), 0);
 
-			await tick();
+				await tick();
 
-			// Process any queued requests if the chat is idle
+				if (chatIdProp && !$temporaryChatEnabled && !chatIdProp.startsWith('local:')) {
+					await markChatReadById(localStorage.token, chatIdProp).catch(() => null);
+				}
+
+				// Process any queued requests if the chat is idle
 			const lastMessage = history.currentId ? history.messages[history.currentId] : null;
 			const isIdle = !lastMessage || lastMessage.role !== 'assistant' || lastMessage.done;
 			if (isIdle) {
@@ -447,10 +459,12 @@
 					message.content += data.content;
 				} else if (type === 'chat:message' || type === 'replace') {
 					message.content = data.content;
-				} else if (type === 'chat:message:files' || type === 'files') {
-					message.files = data.files;
-				} else if (type === 'chat:message:embeds' || type === 'embeds') {
-					message.embeds = data.embeds;
+					} else if (type === 'chat:message:files' || type === 'files') {
+						message.files = data.files;
+					} else if (type === 'chat:message:tasks') {
+						chatTasks = data.tasks;
+					} else if (type === 'chat:message:embeds' || type === 'embeds') {
+						message.embeds = data.embeds;
 
 					// Auto-scroll to the embed once it's rendered in the DOM
 					await tick();
@@ -1263,10 +1277,11 @@
 						? chatContent.history
 						: convertMessagesToHistory(chatContent.messages);
 
-				chatTitle.set(chatContent.title);
+					chatTitle.set(chatContent.title);
 
-				params = chatContent?.params ?? {};
-				chatFiles = chatContent?.files ?? [];
+					params = chatContent?.params ?? {};
+					chatFiles = chatContent?.files ?? [];
+					chatTasks = chat?.tasks ?? [];
 
 				autoScroll = true;
 				await tick();
@@ -1283,9 +1298,19 @@
 					return null;
 				});
 
-				if (taskRes) {
-					taskIds = taskRes.task_ids;
-				}
+					if (taskRes) {
+						taskIds = taskRes.task_ids;
+					}
+
+					const currentMessage = history.currentId ? history.messages[history.currentId] : null;
+					if (
+						currentMessage &&
+						currentMessage.role === 'assistant' &&
+						!currentMessage.done &&
+						(!taskIds || taskIds.length === 0)
+					) {
+						currentMessage.done = true;
+					}
 
 				await tick();
 
@@ -2377,14 +2402,21 @@
 		history.messages[responseMessage.id] = responseMessage;
 	};
 
-	const stopResponse = async () => {
-		if (taskIds) {
-			for (const taskId of taskIds) {
-				const res = await stopTask(localStorage.token, taskId).catch((error) => {
-					toast.error(`${error}`);
-					return null;
-				});
-			}
+		const stopResponse = async () => {
+			if (taskIds) {
+				if ($chatId) {
+					await stopTasksByChatId(localStorage.token, $chatId).catch((error) => {
+						toast.error(`${error}`);
+						return null;
+					});
+				} else {
+					for (const taskId of taskIds) {
+						const res = await stopTask(localStorage.token, taskId).catch((error) => {
+							toast.error(`${error}`);
+							return null;
+						});
+					}
+				}
 
 			taskIds = null;
 
@@ -2861,9 +2893,10 @@
 									{generating}
 									{stopResponse}
 									{createMessagePair}
-									{onUpload}
-									messageQueue={$chatRequestQueues[$chatId] ?? []}
-									onQueueSendNow={async (id) => {
+										{onUpload}
+										messageQueue={$chatRequestQueues[$chatId] ?? []}
+										{chatTasks}
+										onQueueSendNow={async (id) => {
 										const queue = $chatRequestQueues[$chatId] ?? [];
 										const item = queue.find((m) => m.id === id);
 										if (item) {

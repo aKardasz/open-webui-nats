@@ -34,7 +34,8 @@ from pydantic import BaseModel
 
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.utils.access_control import has_permission
+from open_webui.utils.access_control import has_permission, filter_allowed_access_grants
+from open_webui.models.access_grants import AccessGrants
 
 log = logging.getLogger(__name__)
 
@@ -818,16 +819,34 @@ async def get_shared_chat_by_id(share_id: str, user=Depends(get_verified_user), 
     if user.role == 'pending':
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
-    if user.role == 'user' or (user.role == 'admin' and not ENABLE_ADMIN_CHAT_ACCESS):
-        chat = Chats.get_chat_by_share_id(share_id, db=db)
-    elif user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
+    if user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
         chat = Chats.get_chat_by_id(share_id, db=db)
-
-    if chat:
-        return ChatResponse(**chat.model_dump())
-
+        if chat is None:
+            chat = Chats.get_chat_by_share_id(share_id, db=db)
     else:
+        chat = Chats.get_chat_by_share_id(share_id, db=db)
+
+    if not chat:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    from open_webui.models.shared_chats import SharedChats
+
+    shared = SharedChats.get_by_id(share_id, db=db)
+    if shared:
+        has_grant = AccessGrants.has_access(
+            user_id=user.id,
+            resource_type='shared_chat',
+            resource_id=shared.chat_id,
+            permission='read',
+            db=db,
+        )
+        if not has_grant:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
+
+    return ChatResponse(**chat.model_dump())
 
 
 ############################
@@ -871,6 +890,18 @@ async def get_chat_by_id(id: str, user=Depends(get_verified_user), db: Session =
 
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
+
+
+@router.post('/{id}/read', response_model=bool)
+async def mark_chat_read_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+    if id.startswith('local:'):
+        return True
+
+    chat = Chats.get_chat_by_id(id, db=db)
+    if chat is None or (chat.user_id != user.id and user.role != 'admin'):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    return Chats.update_chat_last_read_at_by_id(id, chat.user_id, db=db)
 
 
 ############################
@@ -1139,6 +1170,8 @@ async def clone_chat_by_id(
 async def clone_shared_chat_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
     if user.role == 'admin':
         chat = Chats.get_chat_by_id(id, db=db)
+        if chat is None:
+            chat = Chats.get_chat_by_share_id(id, db=db)
     else:
         chat = Chats.get_chat_by_share_id(id, db=db)
 
@@ -1257,6 +1290,7 @@ async def delete_shared_chat_by_id(id: str, user=Depends(get_verified_user), db:
 
         result = Chats.delete_shared_chat_by_chat_id(id, db=db)
         update_result = Chats.update_chat_share_id_by_id(id, None, db=db)
+        AccessGrants.set_access_grants('shared_chat', id, [], db=db)
 
         return result and update_result != None
     else:
@@ -1264,6 +1298,85 @@ async def delete_shared_chat_by_id(id: str, user=Depends(get_verified_user), db:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+
+############################
+# UpdateSharedChatAccessById
+############################
+
+
+class ChatAccessGrantsForm(BaseModel):
+    access_grants: list[dict]
+
+
+@router.post('/shared/{id}/access/update', response_model=Optional[ChatResponse])
+async def update_shared_chat_access_by_id(
+    request: Request,
+    id: str,
+    form_data: ChatAccessGrantsForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    chat = Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if chat.user_id != user.id and user.role != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    form_data.access_grants = filter_allowed_access_grants(
+        request.app.state.config.USER_PERMISSIONS,
+        user.id,
+        user.role,
+        form_data.access_grants,
+        'sharing.public_chats',
+    )
+
+    AccessGrants.set_access_grants('shared_chat', id, form_data.access_grants, db=db)
+
+    return ChatResponse(**chat.model_dump())
+
+
+############################
+# GetSharedChatAccessById
+############################
+
+
+@router.get('/shared/{id}/access', response_model=list)
+async def get_shared_chat_access_by_id(
+    id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    chat = Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if chat.user_id != user.id and user.role != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    grants = AccessGrants.get_grants_by_resource('shared_chat', id, db=db)
+    return [
+        {
+            'id': g.id,
+            'principal_type': g.principal_type,
+            'principal_id': g.principal_id,
+            'permission': g.permission,
+        }
+        for g in grants
+    ]
 
 
 ############################

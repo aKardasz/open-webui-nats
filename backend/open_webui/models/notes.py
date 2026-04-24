@@ -12,7 +12,7 @@ from open_webui.models.access_grants import AccessGrantModel, AccessGrants
 
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import BigInteger, Column, Text, JSON
+from sqlalchemy import BigInteger, Boolean, Column, Text, JSON
 from sqlalchemy import or_, func, cast
 
 ####################
@@ -29,6 +29,7 @@ class Note(Base):
     title = Column(Text)
     data = Column(JSON, nullable=True)
     meta = Column(JSON, nullable=True)
+    is_pinned = Column(Boolean, default=False, nullable=True)
 
     created_at = Column(BigInteger)
     updated_at = Column(BigInteger)
@@ -43,6 +44,7 @@ class NoteModel(BaseModel):
     title: str
     data: Optional[dict] = None
     meta: Optional[dict] = None
+    is_pinned: Optional[bool] = False
 
     access_grants: list[AccessGrantModel] = Field(default_factory=list)
 
@@ -77,6 +79,7 @@ class NoteItemResponse(BaseModel):
     id: str
     title: str
     data: Optional[dict]
+    is_pinned: Optional[bool] = False
     updated_at: int
     created_at: int
     user: Optional[UserResponse] = None
@@ -266,6 +269,29 @@ class NoteTable:
             grants_map = AccessGrants.get_grants_by_resources('note', note_ids, db=db)
             return [self._to_note_model(note, access_grants=grants_map.get(note.id, []), db=db) for note in notes]
 
+    def get_pinned_notes_by_user_id(
+        self,
+        user_id: str,
+        permission: str = 'read',
+        skip: int = 0,
+        limit: int = 50,
+        db: Optional[Session] = None,
+    ) -> list[NoteModel]:
+        with get_db_context(db) as db:
+            user_group_ids = [group.id for group in Groups.get_groups_by_member_id(user_id, db=db)]
+            query = db.query(Note).filter(Note.is_pinned == True).order_by(Note.updated_at.desc())  # noqa: E712
+            query = self._has_permission(db, query, {'user_id': user_id, 'group_ids': user_group_ids}, permission)
+
+            if skip is not None:
+                query = query.offset(skip)
+            if limit is not None:
+                query = query.limit(limit)
+
+            notes = query.all()
+            note_ids = [note.id for note in notes]
+            grants_map = AccessGrants.get_grants_by_resources('note', note_ids, db=db)
+            return [self._to_note_model(note, access_grants=grants_map.get(note.id, []), db=db) for note in notes]
+
     def get_note_by_id(self, id: str, db: Optional[Session] = None) -> Optional[NoteModel]:
         with get_db_context(db) as db:
             note = db.query(Note).filter(Note.id == id).first()
@@ -295,6 +321,17 @@ class NoteTable:
 
             db.commit()
             return self._to_note_model(note, db=db) if note else None
+
+    def toggle_note_pinned_by_id(self, id: str, db: Optional[Session] = None) -> Optional[NoteModel]:
+        with get_db_context(db) as db:
+            note = db.query(Note).filter(Note.id == id).first()
+            if not note:
+                return None
+
+            note.is_pinned = not bool(note.is_pinned)
+            note.updated_at = int(time.time_ns())
+            db.commit()
+            return self._to_note_model(note, db=db)
 
     def delete_note_by_id(self, id: str, db: Optional[Session] = None) -> bool:
         try:

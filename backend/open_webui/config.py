@@ -1434,6 +1434,10 @@ USER_PERMISSIONS_FEATURES_CHANNELS = os.environ.get('USER_PERMISSIONS_FEATURES_C
 USER_PERMISSIONS_FEATURES_API_KEYS = os.environ.get('USER_PERMISSIONS_FEATURES_API_KEYS', 'False').lower() == 'true'
 
 USER_PERMISSIONS_FEATURES_MEMORIES = os.environ.get('USER_PERMISSIONS_FEATURES_MEMORIES', 'True').lower() == 'true'
+USER_PERMISSIONS_FEATURES_AUTOMATIONS = (
+    os.environ.get('USER_PERMISSIONS_FEATURES_AUTOMATIONS', 'False').lower() == 'true'
+)
+USER_PERMISSIONS_FEATURES_CALENDAR = os.environ.get('USER_PERMISSIONS_FEATURES_CALENDAR', 'False').lower() == 'true'
 
 
 USER_PERMISSIONS_SETTINGS_INTERFACE = os.environ.get('USER_PERMISSIONS_SETTINGS_INTERFACE', 'True').lower() == 'true'
@@ -1504,6 +1508,8 @@ DEFAULT_USER_PERMISSIONS = {
         'image_generation': USER_PERMISSIONS_FEATURES_IMAGE_GENERATION,
         'code_interpreter': USER_PERMISSIONS_FEATURES_CODE_INTERPRETER,
         'memories': USER_PERMISSIONS_FEATURES_MEMORIES,
+        'automations': USER_PERMISSIONS_FEATURES_AUTOMATIONS,
+        'calendar': USER_PERMISSIONS_FEATURES_CALENDAR,
     },
     'settings': {
         'interface': USER_PERMISSIONS_SETTINGS_INTERFACE,
@@ -1603,6 +1609,30 @@ ENABLE_USER_WEBHOOKS = PersistentConfig(
     'ENABLE_USER_WEBHOOKS',
     'ui.enable_user_webhooks',
     os.environ.get('ENABLE_USER_WEBHOOKS', 'False').lower() == 'true',
+)
+
+ENABLE_CALENDAR = PersistentConfig(
+    'ENABLE_CALENDAR',
+    'ui.enable_calendar',
+    os.environ.get('ENABLE_CALENDAR', 'False').lower() == 'true',
+)
+
+ENABLE_AUTOMATIONS = PersistentConfig(
+    'ENABLE_AUTOMATIONS',
+    'ui.enable_automations',
+    os.environ.get('ENABLE_AUTOMATIONS', 'False').lower() == 'true',
+)
+
+AUTOMATION_MAX_COUNT = PersistentConfig(
+    'AUTOMATION_MAX_COUNT',
+    'ui.automation_max_count',
+    os.environ.get('AUTOMATION_MAX_COUNT', ''),
+)
+
+AUTOMATION_MIN_INTERVAL = PersistentConfig(
+    'AUTOMATION_MIN_INTERVAL',
+    'ui.automation_min_interval',
+    os.environ.get('AUTOMATION_MIN_INTERVAL', ''),
 )
 
 # FastAPI / AnyIO settings

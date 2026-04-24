@@ -63,7 +63,9 @@
 	import FolderModal from './Sidebar/Folders/FolderModal.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
 	import PinnedModelList from './Sidebar/PinnedModelList.svelte';
+	import Calendar from '../icons/Calendar.svelte';
 	import Note from '../icons/Note.svelte';
+	import QueueList from '../icons/QueueList.svelte';
 	import { slide } from 'svelte/transition';
 	import HotkeyHint from '../common/HotkeyHint.svelte';
 
@@ -767,8 +769,8 @@
 					</Tooltip>
 				</div>
 
-				{#if ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true))}
-					<div class="">
+					{#if ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true))}
+						<div class="">
 						<Tooltip content={$i18n.t('Notes')} placement="right">
 							<a
 								class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
@@ -1001,8 +1003,8 @@
 						</button>
 					</div>
 
-					{#if ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true))}
-						<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
+						{#if ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true))}
+							<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
 							<a
 								id="sidebar-notes-button"
 								class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
@@ -1022,7 +1024,93 @@
 						</div>
 					{/if}
 
-					{#if $user?.role === 'admin' || $user?.permissions?.workspace?.models || $user?.permissions?.workspace?.knowledge || $user?.permissions?.workspace?.prompts || $user?.permissions?.workspace?.tools}
+					{#if ($config?.features?.enable_calendar ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.calendar ?? false))}
+						<div class="">
+							<Tooltip content={$i18n.t('Calendar')} placement="right">
+								<a
+									class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+									href="/calendar"
+									on:click={async (e) => {
+										e.stopImmediatePropagation();
+										e.preventDefault();
+
+										goto('/calendar');
+										itemClickHandler();
+									}}
+									draggable="false"
+									aria-label={$i18n.t('Calendar')}
+								>
+									<div class=" self-center flex items-center justify-center size-9">
+										<Calendar className="size-4.5" />
+									</div>
+								</a>
+							</Tooltip>
+						</div>
+					{/if}
+
+					{#if ($config?.features?.enable_automations ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.automations ?? false))}
+						<div class="">
+							<Tooltip content={$i18n.t('Automations')} placement="right">
+								<a
+									class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+									href="/automations"
+									on:click={async (e) => {
+										e.stopImmediatePropagation();
+										e.preventDefault();
+
+										goto('/automations');
+										itemClickHandler();
+									}}
+									draggable="false"
+									aria-label={$i18n.t('Automations')}
+								>
+									<div class=" self-center flex items-center justify-center size-9">
+										<QueueList className="size-4.5" />
+									</div>
+								</a>
+							</Tooltip>
+							</div>
+						{/if}
+
+						{#if ($config?.features?.enable_calendar ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.calendar ?? false))}
+							<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
+								<a
+									class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+									href="/calendar"
+									on:click={itemClickHandler}
+									draggable="false"
+									aria-label={$i18n.t('Calendar')}
+								>
+									<div class="self-center">
+										<Calendar className="size-4.5" strokeWidth="2" />
+									</div>
+									<div class="flex self-center translate-y-[0.5px]">
+										<div class=" self-center text-sm font-primary">{$i18n.t('Calendar')}</div>
+									</div>
+								</a>
+							</div>
+						{/if}
+
+						{#if ($config?.features?.enable_automations ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.automations ?? false))}
+							<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
+								<a
+									class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+									href="/automations"
+									on:click={itemClickHandler}
+									draggable="false"
+									aria-label={$i18n.t('Automations')}
+								>
+									<div class="self-center">
+										<QueueList className="size-4.5" strokeWidth="2" />
+									</div>
+									<div class="flex self-center translate-y-[0.5px]">
+										<div class=" self-center text-sm font-primary">{$i18n.t('Automations')}</div>
+									</div>
+								</a>
+							</div>
+						{/if}
+
+						{#if $user?.role === 'admin' || $user?.permissions?.workspace?.models || $user?.permissions?.workspace?.knowledge || $user?.permissions?.workspace?.prompts || $user?.permissions?.workspace?.tools}
 						<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
 							<a
 								id="sidebar-workspace-button"

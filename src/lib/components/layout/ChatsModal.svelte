@@ -270,7 +270,7 @@
 									{/if}
 									<a
 										class={showUserInfo ? 'flex-1' : 'basis-3/5'}
-										href={shareUrl ? `/s/${chat.id}` : `/c/${chat.id}`}
+										href={shareUrl ? `/s/${chat.share_id ?? chat.id}` : `/c/${chat.id}`}
 										on:click={() => (show = false)}
 									>
 										<div class="text-ellipsis line-clamp-1 w-full">

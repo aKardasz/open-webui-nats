@@ -19,6 +19,9 @@ from open_webui.env import (
 
 log = logging.getLogger(__name__)
 
+# Backward-compatible alias used by the existing util test suite.
+MAX_RETRY_COUNT = REDIS_SENTINEL_MAX_RETRY_COUNT
+
 
 # Let not our connections be timed out but deliver them from
 # partition. For the cache and the socket and the uptime
@@ -45,6 +48,36 @@ class SentinelRedisProxy:
 
         FACTORY_METHODS = {'pipeline', 'pubsub', 'monitor', 'client', 'transaction'}
         if item in FACTORY_METHODS:
+            if self._async_mode:
+
+                def _wrapped_factory(*args, **kwargs):
+                    for i in range(REDIS_SENTINEL_MAX_RETRY_COUNT):
+                        try:
+                            method = getattr(self._master(), item)
+                            return method(*args, **kwargs)
+                        except (
+                            redis.exceptions.ConnectionError,
+                            redis.exceptions.ReadOnlyError,
+                        ) as e:
+                            if i < REDIS_SENTINEL_MAX_RETRY_COUNT - 1:
+                                log.debug(
+                                    'Redis sentinel fail-over (%s). Retry %s/%s',
+                                    type(e).__name__,
+                                    i + 1,
+                                    REDIS_SENTINEL_MAX_RETRY_COUNT,
+                                )
+                                if REDIS_RECONNECT_DELAY:
+                                    time.sleep(REDIS_RECONNECT_DELAY / 1000)
+                                continue
+                            log.error(
+                                'Redis factory operation failed after %s retries: %s',
+                                REDIS_SENTINEL_MAX_RETRY_COUNT,
+                                e,
+                            )
+                            raise e from e
+
+                return _wrapped_factory
+
             return orig_attr
 
         if self._async_mode:

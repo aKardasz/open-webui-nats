@@ -99,6 +99,7 @@
 	import InputModal from '../common/InputModal.svelte';
 	import Expand from '../icons/Expand.svelte';
 	import QueuedMessageItem from './MessageInput/QueuedMessageItem.svelte';
+	import TaskList from './Messages/ResponseMessage/TaskList.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -139,6 +140,7 @@
 	export let onQueueSendNow: (id: string) => void = () => {};
 	export let onQueueEdit: (id: string) => void = () => {};
 	export let onQueueDelete: (id: string) => void = () => {};
+	export let chatTasks = [];
 
 	let inputContent = null;
 
@@ -1211,13 +1213,19 @@
 							dispatch('submit', prompt);
 						}}
 					>
-						<button
-							id="generate-message-pair-button"
-							class="hidden"
-							on:click={() => createMessagePair(prompt)}
-						/>
+							<button
+								id="generate-message-pair-button"
+								class="hidden"
+								on:click={() => createMessagePair(prompt)}
+							/>
 
-						<!-- Queued messages display -->
+							{#if chatTasks.length > 0}
+								<div class="mx-1">
+									<TaskList tasks={chatTasks} />
+								</div>
+							{/if}
+
+							<!-- Queued messages display -->
 						{#if messageQueue.length > 0}
 							<div
 								class="mb-1 mx-2 py-0.5 px-1.5 rounded-2xl bg-white dark:bg-gray-900/60 border border-gray-100 dark:border-gray-800/50 overflow-x-hidden overflow-y-auto max-h-[25vh]"

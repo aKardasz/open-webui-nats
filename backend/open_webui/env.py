@@ -268,6 +268,7 @@ WEBUI_BUILD_HASH = os.environ.get('WEBUI_BUILD_HASH', 'dev-build')
 ####################################
 
 DATA_DIR = Path(os.getenv('DATA_DIR', BACKEND_DIR / 'data')).resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 if FROM_INIT_PY:
     NEW_DATA_DIR = Path(os.getenv('DATA_DIR', OPEN_WEBUI_DIR / 'data')).resolve()
@@ -523,6 +524,14 @@ except ValueError:
 
 ENABLE_EMBEDDED_RETRIEVAL_WORKER = os.environ.get('ENABLE_EMBEDDED_RETRIEVAL_WORKER', 'true').lower() == 'true'
 WORKER_ONLY_MODE = os.environ.get('WORKER_ONLY_MODE', 'false').lower() == 'true'
+
+STARTUP_PREWARM_TIMEOUT_SECONDS = os.environ.get('STARTUP_PREWARM_TIMEOUT_SECONDS', '30')
+try:
+    STARTUP_PREWARM_TIMEOUT_SECONDS = float(STARTUP_PREWARM_TIMEOUT_SECONDS)
+    if STARTUP_PREWARM_TIMEOUT_SECONDS <= 0:
+        STARTUP_PREWARM_TIMEOUT_SECONDS = 30.0
+except ValueError:
+    STARTUP_PREWARM_TIMEOUT_SECONDS = 30.0
 
 ####################################
 # UVICORN WORKERS

@@ -31,13 +31,14 @@
 
 	import { goto } from '$app/navigation';
 	import { WEBUI_NAME, config, user } from '$lib/stores';
-	import {
-		createNewNote,
-		deleteNoteById,
-		getNoteById,
-		getNoteList,
-		searchNotes
-	} from '$lib/apis/notes';
+		import {
+			createNewNote,
+			deleteNoteById,
+			getNoteById,
+			getNoteList,
+			pinNoteById,
+			searchNotes
+		} from '$lib/apis/notes';
 	import { capitalizeFirstLetter, copyToClipboard, getTimeRange } from '$lib/utils';
 	import { downloadPdf, createNoteHandler } from './utils';
 
@@ -104,6 +105,17 @@
 
 	const deleteNoteHandler = async (id) => {
 		const res = await deleteNoteById(localStorage.token, id).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (res) {
+			init();
+		}
+	};
+
+	const pinNoteHandler = async (id) => {
+		const res = await pinNoteById(localStorage.token, id).catch((error) => {
 			toast.error(`${error}`);
 			return null;
 		});
@@ -519,6 +531,10 @@
 
 																<div>
 																	<NoteMenu
+																		isPinned={note.is_pinned ?? false}
+																		onTogglePin={() => {
+																			pinNoteHandler(note.id);
+																		}}
 																		onDownload={(type) => {
 																			selectedNote = note;
 
@@ -581,6 +597,10 @@
 
 																<div>
 																	<NoteMenu
+																		isPinned={note.is_pinned ?? false}
+																		onTogglePin={() => {
+																			pinNoteHandler(note.id);
+																		}}
 																		onDownload={(type) => {
 																			selectedNote = note;
 

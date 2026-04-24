@@ -67,10 +67,13 @@ from open_webui.socket.main import (
     periodic_session_pool_cleanup,
     get_event_emitter,
     get_models_in_use,
+    get_user_id_from_session_pool,
 )
 from open_webui.routers import (
     analytics,
+    automations,
     audio,
+    calendar,
     images,
     ollama,
     openai,
@@ -386,6 +389,10 @@ from open_webui.config import (
     ENABLE_COMMUNITY_SHARING,
     ENABLE_MESSAGE_RATING,
     ENABLE_USER_WEBHOOKS,
+    ENABLE_AUTOMATIONS,
+    ENABLE_CALENDAR,
+    AUTOMATION_MAX_COUNT,
+    AUTOMATION_MIN_INTERVAL,
     ENABLE_EVALUATION_ARENA_MODELS,
     BYPASS_ADMIN_ACCESS_CONTROL,
     USER_PERMISSIONS,
@@ -492,6 +499,7 @@ from open_webui.env import (
     ENABLE_EMBEDDED_RETRIEVAL_WORKER,
     RETRIEVAL_TRANSPORT,
     WORKER_ONLY_MODE,
+    STARTUP_PREWARM_TIMEOUT_SECONDS,
     GLOBAL_LOG_LEVEL,
     MAX_BODY_LOG_SIZE,
     SAFE_MODE,
@@ -551,6 +559,7 @@ from open_webui.utils.retrieval_transport import build_retrieval_transport
 from open_webui.utils.pipeline_runner import should_start_pipeline_runner, start_pipeline_runner_with_retry
 from open_webui.utils.terminal_service import should_start_terminal_service, start_terminal_service_with_retry
 from open_webui.utils.runtime_registry import periodic_runtime_registry_heartbeat
+from open_webui.utils.automations import register_automation_runtime_provider, scheduler_worker_loop
 
 from open_webui.utils.auth import (
     get_license_data,
@@ -578,6 +587,7 @@ from open_webui.tasks import (
     list_task_ids_by_item_id,
     create_task,
     stop_task,
+    stop_item_tasks,
     list_tasks,
 )  # Import from tasks.py
 
@@ -610,7 +620,7 @@ class SPAStaticFiles(StaticFiles):
 
 
 if LOG_FORMAT != 'json':
-    print(rf"""
+    _startup_banner = rf"""
  ██████╗ ██████╗ ███████╗███╗   ██╗    ██╗    ██╗███████╗██████╗ ██╗   ██╗██╗
 ██╔═══██╗██╔══██╗██╔════╝████╗  ██║    ██║    ██║██╔════╝██╔══██╗██║   ██║██║
 ██║   ██║██████╔╝█████╗  ██╔██╗ ██║    ██║ █╗ ██║█████╗  ██████╔╝██║   ██║██║
@@ -622,7 +632,15 @@ if LOG_FORMAT != 'json':
 v{VERSION} - building the best AI user interface.
 {f'Commit: {WEBUI_BUILD_HASH}' if WEBUI_BUILD_HASH != 'dev-build' else ''}
 https://github.com/open-webui/open-webui
-""")
+"""
+    try:
+        print(_startup_banner)
+    except UnicodeEncodeError:
+        print(
+            f'Open WebUI v{VERSION} - building the best AI user interface.'
+            + (f' Commit: {WEBUI_BUILD_HASH}' if WEBUI_BUILD_HASH != 'dev-build' else '')
+        )
+        print('https://github.com/open-webui/open-webui')
 
 
 @asynccontextmanager
@@ -633,30 +651,37 @@ async def lifespan(app: FastAPI):
 
     app.state.instance_id = INSTANCE_ID
     start_logger()
+    log.info('Startup phase: logger initialized.')
 
     if RESET_CONFIG_ON_START:
         reset_config()
+        log.info('Startup phase: config reset complete.')
 
     if LICENSE_KEY:
         get_license_data(app, LICENSE_KEY)
+        log.info('Startup phase: license data loaded.')
 
     # Create admin account from env vars if specified and no users exist
     if WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD:
         if create_admin_user(WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD, WEBUI_ADMIN_NAME):
             # Disable signup since we now have an admin
             app.state.config.ENABLE_SIGNUP = False
+        log.info('Startup phase: admin bootstrap evaluated.')
 
     # This should be blocking (sync) so functions are not deactivated on first /get_models calls
     # when the first user lands on the / route.
     log.info('Installing external dependencies of functions and tools...')
     install_tool_and_function_dependencies()
+    log.info('Startup phase: dependency installation scan complete.')
 
+    log.info('Startup phase: initializing redis connection...')
     app.state.redis = get_redis_connection(
         redis_url=REDIS_URL,
         redis_sentinels=get_sentinels_from_env(REDIS_SENTINEL_HOSTS, REDIS_SENTINEL_PORT),
         redis_cluster=REDIS_CLUSTER,
         async_mode=True,
     )
+    log.info('Startup phase: redis initialization complete.')
 
     if not WORKER_ONLY_MODE and (app.state.redis is not None or NATS_URL):
         app.state.task_command_listener = asyncio.create_task(redis_task_command_listener(app))
@@ -688,31 +713,48 @@ async def lifespan(app: FastAPI):
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
+        log.info('Startup phase: thread pool limiter configured.')
 
     if not WORKER_ONLY_MODE:
         asyncio.create_task(periodic_usage_pool_cleanup())
         asyncio.create_task(periodic_session_pool_cleanup())
+        if getattr(app.state.config, 'ENABLE_AUTOMATIONS', False):
+            app.state.automation_scheduler_task = asyncio.create_task(scheduler_worker_loop(app))
+        log.info('Startup phase: background housekeeping tasks scheduled.')
 
     if not WORKER_ONLY_MODE and app.state.config.ENABLE_BASE_MODELS_CACHE:
         try:
-            await get_all_models(
-                Request(
-                    # Creating a mock request object to pass to get_all_models
-                    {
-                        'type': 'http',
-                        'asgi.version': '3.0',
-                        'asgi.spec_version': '2.0',
-                        'method': 'GET',
-                        'path': '/internal',
-                        'query_string': b'',
-                        'headers': Headers({}).raw,
-                        'client': ('127.0.0.1', 12345),
-                        'server': ('127.0.0.1', 80),
-                        'scheme': 'http',
-                        'app': app,
-                    }
+            log.info(
+                'Startup phase: prewarming base models cache (timeout=%ss)...',
+                STARTUP_PREWARM_TIMEOUT_SECONDS,
+            )
+            await asyncio.wait_for(
+                get_all_models(
+                    Request(
+                        # Creating a mock request object to pass to get_all_models
+                        {
+                            'type': 'http',
+                            'asgi.version': '3.0',
+                            'asgi.spec_version': '2.0',
+                            'method': 'GET',
+                            'path': '/internal',
+                            'query_string': b'',
+                            'headers': Headers({}).raw,
+                            'client': ('127.0.0.1', 12345),
+                            'server': ('127.0.0.1', 80),
+                            'scheme': 'http',
+                            'app': app,
+                        }
+                    ),
+                    None,
                 ),
-                None,
+                timeout=STARTUP_PREWARM_TIMEOUT_SECONDS,
+            )
+            log.info('Startup phase: base models prewarm complete.')
+        except asyncio.TimeoutError:
+            log.warning(
+                'Base models prewarm exceeded %ss and was skipped for startup readiness.',
+                STARTUP_PREWARM_TIMEOUT_SECONDS,
             )
         except Exception as e:
             log.warning(f'Failed to pre-fetch models at startup: {e}')
@@ -722,6 +764,10 @@ async def lifespan(app: FastAPI):
         len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0 or len(app.state.config.TERMINAL_SERVER_CONNECTIONS) > 0
     ):
         try:
+            log.info(
+                'Startup phase: initializing tool/terminal runtime metadata (timeout=%ss)...',
+                STARTUP_PREWARM_TIMEOUT_SECONDS,
+            )
             mock_request = Request(
                 {
                     'type': 'http',
@@ -740,14 +786,20 @@ async def lifespan(app: FastAPI):
 
             if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
                 log.info('Initializing tool servers...')
-                await set_tool_servers(mock_request)
+                await asyncio.wait_for(set_tool_servers(mock_request), timeout=STARTUP_PREWARM_TIMEOUT_SECONDS)
                 log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
 
             if len(app.state.config.TERMINAL_SERVER_CONNECTIONS) > 0:
                 log.info('Initializing terminal servers...')
-                await set_terminal_servers(mock_request)
+                await asyncio.wait_for(set_terminal_servers(mock_request), timeout=STARTUP_PREWARM_TIMEOUT_SECONDS)
                 log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
 
+            log.info('Startup phase: tool/terminal initialization complete.')
+        except asyncio.TimeoutError:
+            log.warning(
+                'Tool/terminal initialization exceeded %ss and was skipped for startup readiness.',
+                STARTUP_PREWARM_TIMEOUT_SECONDS,
+            )
         except Exception as e:
             log.warning(f'Failed to initialize tool/terminal servers at startup: {e}')
 
@@ -773,6 +825,7 @@ async def lifespan(app: FastAPI):
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True
+    log.info('Startup phase: complete; application marked ready.')
 
     yield
 
@@ -789,6 +842,11 @@ async def lifespan(app: FastAPI):
         app.state.runtime_registry_heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await app.state.runtime_registry_heartbeat_task
+
+    if hasattr(app.state, 'automation_scheduler_task'):
+        app.state.automation_scheduler_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await app.state.automation_scheduler_task
 
     if hasattr(app.state, 'task_command_listener'):
         app.state.task_command_listener.cancel()
@@ -911,6 +969,7 @@ app.state.TOOL_SERVERS = []
 app.state.RUNTIME_SERVICE_REGISTRY = []
 app.state.RUNTIME_SERVICE_DISABLED_TYPES = set()
 app.state.RUNTIME_SERVICE_RECORD_PROVIDERS = []
+register_automation_runtime_provider(app)
 
 ########################################
 #
@@ -995,6 +1054,10 @@ app.state.config.ENABLE_NOTES = ENABLE_NOTES
 app.state.config.ENABLE_COMMUNITY_SHARING = ENABLE_COMMUNITY_SHARING
 app.state.config.ENABLE_MESSAGE_RATING = ENABLE_MESSAGE_RATING
 app.state.config.ENABLE_USER_WEBHOOKS = ENABLE_USER_WEBHOOKS
+app.state.config.ENABLE_AUTOMATIONS = ENABLE_AUTOMATIONS
+app.state.config.ENABLE_CALENDAR = ENABLE_CALENDAR
+app.state.config.AUTOMATION_MAX_COUNT = AUTOMATION_MAX_COUNT
+app.state.config.AUTOMATION_MIN_INTERVAL = AUTOMATION_MIN_INTERVAL
 app.state.config.ENABLE_USER_STATUS = ENABLE_USER_STATUS
 
 app.state.config.ENABLE_EVALUATION_ARENA_MODELS = ENABLE_EVALUATION_ARENA_MODELS
@@ -1647,6 +1710,8 @@ if ENABLE_ADMIN_ANALYTICS:
     app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
 app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
 app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
+app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
+app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
 
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
@@ -2111,16 +2176,37 @@ async def list_tasks_endpoint(request: Request, user=Depends(get_verified_user))
     return {'tasks': await list_tasks(request.app.state.redis)}
 
 
-@app.get('/api/tasks/chat/{chat_id}')
+@app.get('/api/tasks/chat/{chat_id:path}')
 async def list_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=Depends(get_verified_user)):
-    chat = Chats.get_chat_by_id(chat_id)
-    if chat is None or chat.user_id != user.id:
-        return {'task_ids': []}
+    if chat_id.startswith('local:'):
+        socket_id = chat_id[len('local:') :]
+        owner_id = get_user_id_from_session_pool(socket_id)
+        if owner_id != user.id and user.role != 'admin':
+            return {'task_ids': []}
+    else:
+        chat = Chats.get_chat_by_id(chat_id)
+        if chat is None or (chat.user_id != user.id and user.role != 'admin'):
+            return {'task_ids': []}
 
     task_ids = await list_task_ids_by_item_id(request.app.state.redis, chat_id)
 
     log.debug(f'Task IDs for chat {chat_id}: {task_ids}')
     return {'task_ids': task_ids}
+
+
+@app.post('/api/tasks/chat/{chat_id:path}/stop')
+async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=Depends(get_verified_user)):
+    if chat_id.startswith('local:'):
+        socket_id = chat_id[len('local:') :]
+        owner_id = get_user_id_from_session_pool(socket_id)
+        if owner_id != user.id and user.role != 'admin':
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    else:
+        chat = Chats.get_chat_by_id(chat_id)
+        if chat is None or (chat.user_id != user.id and user.role != 'admin'):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    return await stop_item_tasks(request.app.state.redis, chat_id)
 
 
 ##################################
@@ -2196,6 +2282,8 @@ async def get_app_config(request: Request):
                     'enable_community_sharing': app.state.config.ENABLE_COMMUNITY_SHARING,
                     'enable_message_rating': app.state.config.ENABLE_MESSAGE_RATING,
                     'enable_user_webhooks': app.state.config.ENABLE_USER_WEBHOOKS,
+                    'enable_automations': app.state.config.ENABLE_AUTOMATIONS,
+                    'enable_calendar': app.state.config.ENABLE_CALENDAR,
                     'enable_user_status': app.state.config.ENABLE_USER_STATUS,
                     'enable_admin_export': ENABLE_ADMIN_EXPORT,
                     'enable_admin_chat_access': ENABLE_ADMIN_CHAT_ACCESS,

@@ -3,28 +3,55 @@
 	import { models, config } from '$lib/stores';
 
 	import { toast } from 'svelte-sonner';
-	import { deleteSharedChatById, getChatById, shareChatById } from '$lib/apis/chats';
+	import {
+		deleteSharedChatById,
+		getChatAccessGrants,
+		getChatById,
+		shareChatById,
+		updateChatAccessGrants
+	} from '$lib/apis/chats';
 	import { copyToClipboard } from '$lib/utils';
 
 	import Modal from '../common/Modal.svelte';
 	import Link from '../icons/Link.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
+	import AccessControl from '$lib/components/workspace/common/AccessControl.svelte';
 
 	export let chatId;
 
 	let chat = null;
 	let shareUrl = null;
+	let accessGrants: any[] = [];
 	const i18n = getContext('i18n');
 
 	const shareLocalChat = async () => {
 		const _chat = chat;
 
 		const sharedChat = await shareChatById(localStorage.token, chatId);
-		shareUrl = `${window.location.origin}/s/${sharedChat.id}`;
+		shareUrl = `${window.location.origin}/s/${sharedChat.share_id ?? sharedChat.id}`;
 		console.log(shareUrl);
 		chat = await getChatById(localStorage.token, chatId);
 
 		return shareUrl;
+	};
+
+	const loadAccessGrants = async () => {
+		if (!chatId) return;
+		try {
+			accessGrants = (await getChatAccessGrants(localStorage.token, chatId)) ?? [];
+		} catch (e) {
+			console.error('Failed to load access grants', e);
+			accessGrants = [];
+		}
+	};
+
+	const saveAccessGrants = async () => {
+		try {
+			await updateChatAccessGrants(localStorage.token, chatId, accessGrants);
+			toast.success($i18n.t('Access updated'));
+		} catch (e) {
+			toast.error(`${e}`);
+		}
 	};
 
 	const shareChat = async () => {
@@ -68,16 +95,18 @@
 
 	$: if (show) {
 		(async () => {
-			if (chatId) {
-				const _chat = await getChatById(localStorage.token, chatId);
-				if (isDifferentChat(_chat)) {
-					chat = _chat;
+				if (chatId) {
+					const _chat = await getChatById(localStorage.token, chatId);
+					if (isDifferentChat(_chat)) {
+						chat = _chat;
+					}
+					await loadAccessGrants();
+				} else {
+					chat = null;
+					accessGrants = [];
+					console.log(chat);
 				}
-			} else {
-				chat = null;
-				console.log(chat);
-			}
-		})();
+			})();
 	}
 </script>
 
@@ -98,7 +127,7 @@
 
 		{#if chat}
 			<div class="px-5 pt-4 pb-5 w-full flex flex-col justify-center">
-				<div class=" text-sm dark:text-gray-300 mb-1">
+					<div class=" text-sm dark:text-gray-300 mb-1">
 					{#if chat.share_id}
 						<a href="/s/{chat.share_id}" target="_blank"
 							>{$i18n.t('You have shared this chat')}
@@ -121,10 +150,16 @@
 						{$i18n.t(
 							"Messages you send after creating your link won't be shared. Users with the URL will be able to view the shared chat."
 						)}
-					{/if}
-				</div>
+						{/if}
+					</div>
 
-				<div class="flex justify-end">
+					{#if chat.share_id}
+						<div class="mt-3">
+							<AccessControl bind:accessGrants accessRoles={['read']} onChange={saveAccessGrants} />
+						</div>
+					{/if}
+
+					<div class="flex justify-end">
 					<div class="flex flex-col items-end space-x-1 mt-3">
 						<div class="flex gap-1">
 							{#if $config?.features.enable_community_sharing}

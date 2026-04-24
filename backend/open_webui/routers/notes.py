@@ -58,6 +58,7 @@ class NoteItemResponse(BaseModel):
     id: str
     title: str
     data: Optional[dict]
+    is_pinned: Optional[bool] = False
     updated_at: int
     created_at: int
     user: Optional[UserResponse] = None
@@ -85,6 +86,40 @@ async def get_notes(
         skip = (page - 1) * limit
 
     notes = Notes.get_notes_by_user_id(user.id, 'read', skip=skip, limit=limit, db=db)
+    if not notes:
+        return []
+
+    user_ids = list(set(note.user_id for note in notes))
+    users = {user.id: user for user in Users.get_users_by_user_ids(user_ids, db=db)}
+
+    return [
+        NoteUserResponse(
+            **{
+                **note.model_dump(),
+                'data': _truncate_note_data(note.data),
+                'user': UserResponse(**users[note.user_id].model_dump()),
+            }
+        )
+        for note in notes
+        if note.user_id in users
+    ]
+
+
+@router.get('/pinned', response_model=list[NoteItemResponse])
+async def get_pinned_notes(
+    request: Request,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    if user.role != 'admin' and not has_permission(
+        user.id, 'features.notes', request.app.state.config.USER_PERMISSIONS, db=db
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.UNAUTHORIZED,
+        )
+
+    notes = Notes.get_pinned_notes_by_user_id(user.id, 'read', db=db)
     if not notes:
         return []
 
@@ -299,6 +334,34 @@ async def update_note_by_id(
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
+
+
+@router.post('/{id}/pin', response_model=Optional[NoteModel])
+async def pin_note_by_id(
+    request: Request,
+    id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    if user.role != 'admin' and not has_permission(
+        user.id, 'features.notes', request.app.state.config.USER_PERMISSIONS, db=db
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.UNAUTHORIZED,
+        )
+
+    note = Notes.get_note_by_id(id, db=db)
+    if not note:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    if user.role != 'admin' and user.id != note.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    return Notes.toggle_note_pinned_by_id(id, db=db)
 
 
 ############################

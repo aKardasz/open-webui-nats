@@ -19,7 +19,9 @@
 	import Keyboard from '$lib/components/icons/Keyboard.svelte';
 	import ShortcutsModal from '$lib/components/chat/ShortcutsModal.svelte';
 	import Settings from '$lib/components/icons/Settings.svelte';
+	import Calendar from '$lib/components/icons/Calendar.svelte';
 	import Code from '$lib/components/icons/Code.svelte';
+	import QueueList from '$lib/components/icons/QueueList.svelte';
 	import UserGroup from '$lib/components/icons/UserGroup.svelte';
 	import SignOut from '$lib/components/icons/SignOut.svelte';
 	import FaceSmile from '$lib/components/icons/FaceSmile.svelte';
@@ -234,6 +236,56 @@
 				</div>
 				<div class=" self-center truncate">{$i18n.t('Archived Chats')}</div>
 			</button>
+
+			{#if $config?.features?.enable_calendar && (role === 'admin' || ($user?.permissions?.features?.calendar ?? false))}
+				<a
+					href="/calendar"
+					draggable="false"
+					class="flex rounded-xl py-1.5 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer select-none"
+					on:click={async (e) => {
+						if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) {
+							return;
+						}
+						e.preventDefault();
+						show = false;
+						goto('/calendar');
+						if ($mobile) {
+							await tick();
+							showSidebar.set(false);
+						}
+					}}
+				>
+					<div class=" self-center mr-3">
+						<Calendar className="size-5" strokeWidth="1.5" />
+					</div>
+					<div class=" self-center truncate">{$i18n.t('Calendar')}</div>
+				</a>
+			{/if}
+
+			{#if $config?.features?.enable_automations && (role === 'admin' || ($user?.permissions?.features?.automations ?? false))}
+				<a
+					href="/automations"
+					draggable="false"
+					class="flex rounded-xl py-1.5 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer select-none"
+					on:click={async (e) => {
+						if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) {
+							return;
+						}
+						e.preventDefault();
+						show = false;
+						goto('/automations');
+						if ($mobile) {
+							await tick();
+							showSidebar.set(false);
+						}
+					}}
+				>
+					<div class=" self-center mr-3">
+						<QueueList className="size-5" strokeWidth="1.5" />
+					</div>
+					<div class=" self-center truncate">{$i18n.t('Automations')}</div>
+				</a>
+			{/if}
 
 			{#if role === 'admin'}
 				<a

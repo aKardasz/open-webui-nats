@@ -53,6 +53,9 @@ class Chat(Base):
 
     meta = Column(JSON, server_default='{}')
     folder_id = Column(Text, nullable=True)
+    tasks = Column(JSON, nullable=True)
+    summary = Column(Text, nullable=True)
+    last_read_at = Column(BigInteger, nullable=True)
 
     __table_args__ = (
         # Performance indexes for common queries
@@ -86,6 +89,9 @@ class ChatModel(BaseModel):
 
     meta: dict = {}
     folder_id: Optional[str] = None
+    tasks: Optional[list] = None
+    summary: Optional[str] = None
+    last_read_at: Optional[int] = None
 
 
 class ChatFile(Base):
@@ -160,6 +166,9 @@ class ChatResponse(BaseModel):
     pinned: Optional[bool] = False
     meta: dict = {}
     folder_id: Optional[str] = None
+    tasks: Optional[list] = None
+    summary: Optional[str] = None
+    last_read_at: Optional[int] = None
 
 
 class ChatTitleIdResponse(BaseModel):
@@ -171,6 +180,7 @@ class ChatTitleIdResponse(BaseModel):
 
 class SharedChatResponse(BaseModel):
     id: str
+    chat_id: Optional[str] = None
     title: str
     share_id: Optional[str] = None
     updated_at: int
@@ -523,73 +533,52 @@ class ChatTable:
             return message_files
 
     def insert_shared_chat_by_chat_id(self, chat_id: str, db: Optional[Session] = None) -> Optional[ChatModel]:
+        from open_webui.models.shared_chats import SharedChats
+
         with get_db_context(db) as db:
-            # Get the existing chat to share
             chat = db.get(Chat, chat_id)
-            # Check if chat exists
             if not chat:
                 return None
-            # Check if the chat is already shared
-            if chat.share_id:
-                return self.get_chat_by_id_and_user_id(chat.share_id, 'shared', db=db)
-            # Create a new chat with the same data, but with a new ID
-            shared_chat = ChatModel(
-                **{
-                    'id': str(uuid.uuid4()),
-                    'user_id': f'shared-{chat_id}',
-                    'title': chat.title,
-                    'chat': chat.chat,
-                    'meta': chat.meta,
-                    'pinned': chat.pinned,
-                    'folder_id': chat.folder_id,
-                    'created_at': chat.created_at,
-                    'updated_at': int(time.time()),
-                }
-            )
-            shared_result = Chat(**shared_chat.model_dump())
-            db.add(shared_result)
-            db.commit()
-            db.refresh(shared_result)
 
-            # Update the original chat with the share_id
-            result = db.query(Chat).filter_by(id=chat_id).update({'share_id': shared_chat.id})
+            if chat.share_id:
+                return self.update_shared_chat_by_chat_id(chat_id, db=db)
+
+            shared_chat = SharedChats.create(chat_id, chat.user_id, db=db)
+            if not shared_chat:
+                return None
+
+            chat.share_id = shared_chat.id
             db.commit()
-            return shared_chat if (shared_result and result) else None
+            db.refresh(chat)
+            return ChatModel.model_validate(chat)
 
     def update_shared_chat_by_chat_id(self, chat_id: str, db: Optional[Session] = None) -> Optional[ChatModel]:
+        from open_webui.models.shared_chats import SharedChats
+
         try:
             with get_db_context(db) as db:
                 chat = db.get(Chat, chat_id)
-                shared_chat = db.query(Chat).filter_by(user_id=f'shared-{chat_id}').first()
+                if not chat:
+                    return None
 
-                if shared_chat is None:
+                if not chat.share_id:
                     return self.insert_shared_chat_by_chat_id(chat_id, db=db)
 
-                shared_chat.title = chat.title
-                shared_chat.chat = chat.chat
-                shared_chat.meta = chat.meta
-                shared_chat.pinned = chat.pinned
-                shared_chat.folder_id = chat.folder_id
-                shared_chat.updated_at = int(time.time())
-                db.commit()
-                db.refresh(shared_chat)
+                shared_chat = SharedChats.update(chat.share_id, db=db)
+                if not shared_chat:
+                    return self.insert_shared_chat_by_chat_id(chat_id, db=db)
 
-                return ChatModel.model_validate(shared_chat)
+                db.refresh(chat)
+                return ChatModel.model_validate(chat)
         except Exception:
             return None
 
     def delete_shared_chat_by_chat_id(self, chat_id: str, db: Optional[Session] = None) -> bool:
+        from open_webui.models.shared_chats import SharedChats
+
         try:
             with get_db_context(db) as db:
-                # Use subquery to delete chat_messages for shared chats
-                shared_chat_id_subquery = db.query(Chat.id).filter_by(user_id=f'shared-{chat_id}').scalar_subquery()
-                db.query(ChatMessage).filter(ChatMessage.chat_id.in_(shared_chat_id_subquery)).delete(
-                    synchronize_session=False
-                )
-                db.query(Chat).filter_by(user_id=f'shared-{chat_id}').delete()
-                db.commit()
-
-                return True
+                return SharedChats.delete_by_chat_id(chat_id, db=db)
         except Exception:
             return False
 
@@ -614,6 +603,40 @@ class ChatTable:
                 return ChatModel.model_validate(chat)
         except Exception:
             return None
+
+    def update_chat_last_read_at_by_id(
+        self, id: str, user_id: str, db: Optional[Session] = None
+    ) -> bool:
+        try:
+            with get_db_context(db) as db:
+                chat = db.query(Chat).filter_by(id=id, user_id=user_id).first()
+                if not chat:
+                    return False
+                chat.last_read_at = int(time.time())
+                db.commit()
+                return True
+        except Exception:
+            return False
+
+    def update_chat_tasks_by_id(self, id: str, tasks: list[dict], db: Optional[Session] = None) -> Optional[ChatModel]:
+        try:
+            with get_db_context(db) as db:
+                chat = db.get(Chat, id)
+                if chat is None:
+                    return None
+                chat.tasks = tasks
+                db.commit()
+                db.refresh(chat)
+                return ChatModel.model_validate(chat)
+        except Exception:
+            return None
+
+    def get_chat_tasks_by_id(self, id: str, db: Optional[Session] = None) -> list[dict]:
+        with get_db_context(db) as db:
+            row = db.query(Chat.tasks).filter_by(id=id).first()
+            if row is None or row[0] is None:
+                return []
+            return row[0]
 
     def toggle_chat_pinned_by_id(self, id: str, db: Optional[Session] = None) -> Optional[ChatModel]:
         try:
@@ -753,6 +776,7 @@ class ChatTable:
                 SharedChatResponse.model_validate(
                     {
                         'id': chat[0],
+                        'chat_id': chat[0],
                         'title': chat[1],
                         'share_id': chat[2],
                         'updated_at': chat[3],
@@ -881,16 +905,21 @@ class ChatTable:
             return None
 
     def get_chat_by_share_id(self, id: str, db: Optional[Session] = None) -> Optional[ChatModel]:
-        try:
-            with get_db_context(db) as db:
-                # it is possible that the shared link was deleted. hence,
-                # we check if the chat is still shared by checking if a chat with the share_id exists
-                chat = db.query(Chat).filter_by(share_id=id).first()
+        from open_webui.models.shared_chats import SharedChats
 
-                if chat:
-                    return self.get_chat_by_id(id, db=db)
-                else:
-                    return None
+        try:
+            shared = SharedChats.get_by_id(id, db=db)
+            if shared:
+                return ChatModel(
+                    id=shared.id,
+                    user_id=shared.user_id,
+                    title=shared.title,
+                    chat=shared.chat,
+                    created_at=shared.created_at,
+                    updated_at=shared.updated_at,
+                    share_id=shared.id,
+                )
+            return None
         except Exception:
             return None
 
@@ -1459,15 +1488,15 @@ class ChatTable:
             return False
 
     def delete_shared_chats_by_user_id(self, user_id: str, db: Optional[Session] = None) -> bool:
+        from open_webui.models.shared_chats import SharedChats
+
         try:
             with get_db_context(db) as db:
                 chats_by_user = db.query(Chat).filter_by(user_id=user_id).all()
-                shared_chat_ids = [f'shared-{chat.id}' for chat in chats_by_user]
-
-                # Use subquery to delete chat_messages for shared chats
-                shared_id_subq = db.query(Chat.id).filter(Chat.user_id.in_(shared_chat_ids)).subquery()
-                db.query(ChatMessage).filter(ChatMessage.chat_id.in_(shared_id_subq)).delete(synchronize_session=False)
-                db.query(Chat).filter(Chat.user_id.in_(shared_chat_ids)).delete()
+                for chat in chats_by_user:
+                    if chat.share_id:
+                        SharedChats.delete_by_id(chat.share_id, db=db)
+                        chat.share_id = None
                 db.commit()
 
                 return True

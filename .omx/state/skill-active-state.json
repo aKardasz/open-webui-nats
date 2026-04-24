@@ -1,11 +1,19 @@
 {
   "version": 1,
-  "active": false,
-  "skill": "ralplan",
+  "active": true,
+  "skill": "autopilot",
   "keyword": "",
-  "phase": "intake",
-  "activated_at": "2026-04-18T15:17:17.314Z",
-  "updated_at": "2026-04-18T16:10:02.707Z",
+  "phase": "verification",
+  "activated_at": "2026-04-21T15:05:01.045Z",
+  "updated_at": "2026-04-23T23:17:22.446Z",
   "source": "state-server",
-  "active_skills": []
+  "active_skills": [
+    {
+      "skill": "autopilot",
+      "phase": "verification",
+      "active": true,
+      "activated_at": "2026-04-21T15:05:01.045Z",
+      "updated_at": "2026-04-23T23:17:22.446Z"
+    }
+  ]
 }

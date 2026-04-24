@@ -26,7 +26,7 @@ const pypiPackages = ['black', 'pathspec', 'mypy_extensions'];
 
 import { loadPyodide } from 'pyodide';
 import { setGlobalDispatcher, ProxyAgent } from 'undici';
-import { writeFile, readFile, copyFile, readdir, rmdir, access } from 'fs/promises';
+import { writeFile, readFile, copyFile, readdir, rmdir, access, mkdir } from 'fs/promises';
 
 /**
  * Loading network proxy configurations from the environment variables.
@@ -118,9 +118,22 @@ async function downloadPackages() {
 
 async function copyPyodide() {
 	console.log('Copying Pyodide files into static directory');
+	await mkdir('static/pyodide', { recursive: true });
 	// Copy all files from node_modules/pyodide to static/pyodide
 	for await (const entry of await readdir('node_modules/pyodide')) {
-		await copyFile(`node_modules/pyodide/${entry}`, `static/pyodide/${entry}`);
+		const source = `node_modules/pyodide/${entry}`;
+		const destination = `static/pyodide/${entry}`;
+
+		try {
+			await copyFile(source, destination);
+		} catch (err) {
+			if (!['EPERM', 'EXDEV'].includes(err?.code)) {
+				throw err;
+			}
+
+			const buffer = await readFile(source);
+			await writeFile(destination, buffer);
+		}
 	}
 }
 

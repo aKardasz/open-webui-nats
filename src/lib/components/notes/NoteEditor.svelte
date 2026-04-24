@@ -60,12 +60,13 @@
 	// Assuming $i18n.languages is an array of language codes
 	$: loadLocale($i18n.languages);
 
-	import {
-		deleteNoteById,
-		getNoteById,
-		updateNoteById,
-		updateNoteAccessGrants
-	} from '$lib/apis/notes';
+		import {
+			deleteNoteById,
+			getNoteById,
+			pinNoteById,
+			updateNoteById,
+			updateNoteAccessGrants
+		} from '$lib/apis/notes';
 
 	import RichTextInput from '../common/RichTextInput.svelte';
 	import Spinner from '../common/Spinner.svelte';
@@ -607,10 +608,10 @@ ${content}
 		}
 	};
 
-	const deleteNoteHandler = async (id) => {
-		const res = await deleteNoteById(localStorage.token, id).catch((error) => {
-			toast.error(`${error}`);
-			return null;
+		const deleteNoteHandler = async (id) => {
+			const res = await deleteNoteById(localStorage.token, id).catch((error) => {
+				toast.error(`${error}`);
+				return null;
 		});
 
 		if (res) {
@@ -618,8 +619,21 @@ ${content}
 			goto('/notes');
 		} else {
 			toast.error($i18n.t('Failed to delete note'));
-		}
-	};
+			}
+		};
+
+		const pinCurrentNote = async () => {
+			if (!note?.id) return;
+
+			const res = await pinNoteById(localStorage.token, note.id).catch((error) => {
+				toast.error(`${error}`);
+				return null;
+			});
+
+			if (res) {
+				note = { ...note, is_pinned: res.is_pinned };
+			}
+		};
 
 	const scrollToBottom = () => {
 		const element = document.getElementById('note-content-container');
@@ -1058,6 +1072,10 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 								{/if}
 
 								<NoteMenu
+									isPinned={note?.is_pinned ?? false}
+									onTogglePin={async () => {
+										await pinCurrentNote();
+									}}
 									onDownload={(type) => {
 										downloadHandler(type);
 									}}
