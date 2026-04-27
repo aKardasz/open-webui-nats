@@ -4,10 +4,11 @@ from typing import Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Boolean, Column, Index, JSON, String, Text, cast, func, or_
+from sqlalchemy import BigInteger, Boolean, Column, Index, JSON, String, Text, cast, delete, func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from open_webui.internal.db import Base, get_db_context
+from open_webui.internal.db import Base, get_async_db_context, get_db_context
 
 log = logging.getLogger(__name__)
 
@@ -236,14 +237,158 @@ class AutomationTable:
 
             claimed: list[AutomationModel] = []
             for row in rows:
-                row.last_run_at = now_ns
-                row.next_run_at = next_run_ns(row.data.get('rrule', ''), tz=None)
-                claimed.append(AutomationModel.model_validate(row))
+                previous_next_run_at = row.next_run_at
+                claimed_next_run_at = next_run_ns(row.data.get('rrule', ''), tz=None)
+                updated_result = db.execute(
+                    update(Automation)
+                    .where(
+                        Automation.id == row.id,
+                        Automation.is_active == True,  # noqa: E712
+                        Automation.next_run_at == previous_next_run_at,
+                    )
+                    .values(
+                        {
+                            'last_run_at': now_ns,
+                            'next_run_at': claimed_next_run_at,
+                        }
+                    )
+                )
+                if (updated_result.rowcount or 0) == 1:
+                    row.last_run_at = now_ns
+                    row.next_run_at = claimed_next_run_at
+                    claimed.append(AutomationModel.model_validate(row))
 
-            if rows:
+            if claimed:
                 db.commit()
 
             return claimed
+
+    async def insert_async(
+        self,
+        user_id: str,
+        form: AutomationForm,
+        next_run_at: int,
+        db: Optional[AsyncSession] = None,
+    ) -> AutomationModel:
+        async with get_async_db_context(db) as db:
+            now = int(time.time_ns())
+            row = Automation(
+                id=str(uuid4()),
+                user_id=user_id,
+                name=form.name,
+                data=form.data.model_dump(),
+                meta=form.meta,
+                is_active=form.is_active,
+                next_run_at=next_run_at,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return AutomationModel.model_validate(row)
+
+    async def count_by_user_async(self, user_id: str, db: Optional[AsyncSession] = None) -> int:
+        async with get_async_db_context(db) as db:
+            result = await db.execute(select(func.count()).select_from(Automation).where(Automation.user_id == user_id))
+            return int(result.scalar() or 0)
+
+    async def get_by_id_async(self, id: str, db: Optional[AsyncSession] = None) -> Optional[AutomationModel]:
+        async with get_async_db_context(db) as db:
+            row = await db.get(Automation, id)
+            return AutomationModel.model_validate(row) if row else None
+
+    async def search_automations_async(
+        self,
+        user_id: str,
+        query: Optional[str] = None,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 30,
+        db: Optional[AsyncSession] = None,
+    ) -> AutomationListResponse:
+        async with get_async_db_context(db) as db:
+            filters = [Automation.user_id == user_id]
+
+            if query:
+                search = f'%{query}%'
+                filters.append(
+                    or_(
+                        Automation.name.ilike(search),
+                        cast(Automation.data, String).ilike(search),
+                    )
+                )
+
+            if status == 'active':
+                filters.append(Automation.is_active.is_(True))
+            elif status == 'paused':
+                filters.append(Automation.is_active.is_(False))
+
+            total = int(
+                (
+                    await db.execute(
+                        select(func.count()).select_from(Automation).where(*filters)
+                    )
+                ).scalar()
+                or 0
+            )
+            rows = (
+                (
+                    await db.execute(
+                        select(Automation)
+                        .where(*filters)
+                        .order_by(Automation.created_at.desc())
+                        .offset(skip)
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return AutomationListResponse(items=[AutomationModel.model_validate(r) for r in rows], total=total)
+
+    async def update_by_id_async(
+        self,
+        id: str,
+        form: AutomationForm,
+        next_run_at: int,
+        db: Optional[AsyncSession] = None,
+    ) -> Optional[AutomationModel]:
+        async with get_async_db_context(db) as db:
+            row = await db.get(Automation, id)
+            if not row:
+                return None
+            row.name = form.name
+            row.data = form.data.model_dump()
+            row.meta = form.meta
+            if form.is_active is not None:
+                row.is_active = form.is_active
+            row.next_run_at = next_run_at
+            row.updated_at = int(time.time_ns())
+            await db.commit()
+            await db.refresh(row)
+            return AutomationModel.model_validate(row)
+
+    async def toggle_async(self, id: str, next_run_at: Optional[int], db: Optional[AsyncSession] = None) -> Optional[AutomationModel]:
+        async with get_async_db_context(db) as db:
+            row = await db.get(Automation, id)
+            if not row:
+                return None
+            row.is_active = not row.is_active
+            row.next_run_at = next_run_at if row.is_active else None
+            row.updated_at = int(time.time_ns())
+            await db.commit()
+            await db.refresh(row)
+            return AutomationModel.model_validate(row)
+
+    async def delete_async(self, id: str, db: Optional[AsyncSession] = None) -> bool:
+        async with get_async_db_context(db) as db:
+            row = await db.get(Automation, id)
+            if not row:
+                return False
+            await db.delete(row)
+            await db.commit()
+            return True
 
 
 class AutomationRunTable:
@@ -317,6 +462,74 @@ class AutomationRunTable:
         with get_db_context(db) as db:
             db.query(AutomationRun).filter_by(automation_id=automation_id).delete()
             db.commit()
+            return True
+
+    async def get_latest_async(self, automation_id: str, db: Optional[AsyncSession] = None) -> Optional[AutomationRunModel]:
+        async with get_async_db_context(db) as db:
+            row = (
+                (
+                    await db.execute(
+                        select(AutomationRun)
+                        .where(AutomationRun.automation_id == automation_id)
+                        .order_by(AutomationRun.created_at.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            return AutomationRunModel.model_validate(row) if row else None
+
+    async def get_latest_batch_async(
+        self, automation_ids: list[str], db: Optional[AsyncSession] = None
+    ) -> dict[str, AutomationRunModel]:
+        if not automation_ids:
+            return {}
+        async with get_async_db_context(db) as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(AutomationRun)
+                        .where(AutomationRun.automation_id.in_(automation_ids))
+                        .order_by(AutomationRun.automation_id, AutomationRun.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            result = {}
+            for row in rows:
+                if row.automation_id not in result:
+                    result[row.automation_id] = AutomationRunModel.model_validate(row)
+            return result
+
+    async def get_by_automation_async(
+        self,
+        automation_id: str,
+        skip: int = 0,
+        limit: int = 50,
+        db: Optional[AsyncSession] = None,
+    ) -> list[AutomationRunModel]:
+        async with get_async_db_context(db) as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(AutomationRun)
+                        .where(AutomationRun.automation_id == automation_id)
+                        .order_by(AutomationRun.created_at.desc())
+                        .offset(skip)
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [AutomationRunModel.model_validate(r) for r in rows]
+
+    async def delete_by_automation_async(self, automation_id: str, db: Optional[AsyncSession] = None) -> bool:
+        async with get_async_db_context(db) as db:
+            await db.execute(delete(AutomationRun).where(AutomationRun.automation_id == automation_id))
+            await db.commit()
             return True
 
 

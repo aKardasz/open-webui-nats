@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Optional
 
 from open_webui.internal.wrappers import register_connection
@@ -20,6 +20,7 @@ from open_webui.env import (
 from peewee_migrate import Router
 from sqlalchemy import Dialect, create_engine, MetaData, event, types
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import scoped_session, sessionmaker, Session
 from sqlalchemy.pool import QueuePool, NullPool
 from sqlalchemy.sql.type_api import _T
@@ -80,6 +81,20 @@ if ENABLE_DB_MIGRATIONS:
 
 
 SQLALCHEMY_DATABASE_URL = DATABASE_URL
+
+
+def _derive_async_database_url(database_url: str) -> Optional[str]:
+    if database_url.startswith('sqlite+sqlcipher://'):
+        return None
+    if database_url.startswith('sqlite:///'):
+        return database_url.replace('sqlite:///', 'sqlite+aiosqlite:///', 1)
+    if database_url.startswith('sqlite://'):
+        return database_url.replace('sqlite://', 'sqlite+aiosqlite://', 1)
+    if database_url.startswith('postgresql://'):
+        return database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
+    if database_url.startswith('postgres://'):
+        return database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
+    return None
 
 # Handle SQLCipher URLs
 if SQLALCHEMY_DATABASE_URL.startswith('sqlite+sqlcipher://'):
@@ -160,6 +175,27 @@ metadata_obj = MetaData(schema=DATABASE_SCHEMA)
 Base = declarative_base(metadata=metadata_obj)
 ScopedSession = scoped_session(SessionLocal)
 
+ASYNC_SQLALCHEMY_DATABASE_URL = _derive_async_database_url(SQLALCHEMY_DATABASE_URL)
+async_engine = None
+AsyncSessionLocal = None
+if ASYNC_SQLALCHEMY_DATABASE_URL:
+    try:
+        async_engine = create_async_engine(
+            ASYNC_SQLALCHEMY_DATABASE_URL,
+            pool_pre_ping=True,
+        )
+        AsyncSessionLocal = async_sessionmaker(
+            async_engine,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+    except ModuleNotFoundError as exc:
+        log.warning(
+            'Async database scaffold disabled because required driver is not installed for %s: %s',
+            ASYNC_SQLALCHEMY_DATABASE_URL,
+            exc,
+        )
+
 
 def get_session():
     db = SessionLocal()
@@ -172,10 +208,30 @@ def get_session():
 get_db = contextmanager(get_session)
 
 
+async def get_async_session():
+    if AsyncSessionLocal is None:
+        raise RuntimeError('Async database session is not available for the configured DATABASE_URL')
+
+    async with AsyncSessionLocal() as db:
+        yield db
+
+
+get_async_db = asynccontextmanager(get_async_session)
+
+
 @contextmanager
 def get_db_context(db: Optional[Session] = None):
     if isinstance(db, Session) and DATABASE_ENABLE_SESSION_SHARING:
         yield db
     else:
         with get_db() as session:
+            yield session
+
+
+@asynccontextmanager
+async def get_async_db_context(db: Optional[AsyncSession] = None):
+    if isinstance(db, AsyncSession) and DATABASE_ENABLE_SESSION_SHARING:
+        yield db
+    else:
+        async with get_async_db() as session:
             yield session

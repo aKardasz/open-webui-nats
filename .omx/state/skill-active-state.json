@@ -1,19 +1,11 @@
 {
   "version": 1,
-  "active": true,
-  "skill": "autopilot",
+  "active": false,
+  "skill": "ralph",
   "keyword": "",
-  "phase": "verification",
-  "activated_at": "2026-04-21T15:05:01.045Z",
-  "updated_at": "2026-04-23T23:17:22.446Z",
+  "phase": "verifying",
+  "activated_at": "2026-04-24T18:32:41.912Z",
+  "updated_at": "2026-04-24T20:13:25.840Z",
   "source": "state-server",
-  "active_skills": [
-    {
-      "skill": "autopilot",
-      "phase": "verification",
-      "active": true,
-      "activated_at": "2026-04-21T15:05:01.045Z",
-      "updated_at": "2026-04-23T23:17:22.446Z"
-    }
-  ]
+  "active_skills": []
 }

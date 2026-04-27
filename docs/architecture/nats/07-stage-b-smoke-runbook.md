@@ -16,14 +16,16 @@ Expected services:
 - `ollama` from the base compose file, because `open-webui` still depends on it
 - `open-webui`
 - `retrieval-worker`
+- `automation-runner`
 - `terminal-service`
 - `pipeline-runner`
 
 Expected NATS overlay behavior:
 
 - `open-webui` has `NATS_URL=nats://nats:4222`
-- `open-webui` disables embedded retrieval, terminal, and pipeline workers
+- `open-webui` disables embedded retrieval, automation, terminal, and pipeline workers
 - `retrieval-worker` runs `python -m open_webui retrieval-worker`
+- `automation-runner` runs `python -m open_webui automation-runner`
 - `terminal-service` runs `python -m open_webui terminal-service`
 - `pipeline-runner` runs `python -m open_webui pipeline-runner`
 
@@ -53,6 +55,7 @@ Expected output includes at least:
 nats
 ollama
 open-webui
+automation-runner
 pipeline-runner
 retrieval-worker
 terminal-service
@@ -64,13 +67,13 @@ Optional detail check:
 docker-compose -f docker-compose.yaml -f docker-compose.nats.yaml config > .tmp/nats-stage-b-compose.yaml
 ```
 
-Confirm in the rendered config that `open-webui` disables embedded services and the three extracted runtimes have the expected worker-only environment variables.
+Confirm in the rendered config that `open-webui` disables embedded services and the four extracted runtimes have the expected worker-only environment variables.
 
 ## 2. Boot The Topology
 
 ```bash
 docker-compose -f docker-compose.yaml -f docker-compose.nats.yaml up -d --build \
-  nats ollama open-webui retrieval-worker terminal-service pipeline-runner
+  nats ollama open-webui retrieval-worker automation-runner terminal-service pipeline-runner
 ```
 
 Wait for services to settle:
@@ -85,18 +88,19 @@ Passing condition:
 
 - NATS health endpoint returns success.
 - Open WebUI `/health` returns success.
-- `retrieval-worker`, `terminal-service`, and `pipeline-runner` containers remain running instead of crash-looping.
+- `retrieval-worker`, `automation-runner`, `terminal-service`, and `pipeline-runner` containers remain running instead of crash-looping.
 - The worker-only services start after `open-webui` is healthy so database migrations are not raced by multiple containers on a fresh volume.
 
 ## 3. Check Extracted Runtime Startup Evidence
 
 ```bash
-docker-compose -f docker-compose.yaml -f docker-compose.nats.yaml logs --tail=200 retrieval-worker terminal-service pipeline-runner
+docker-compose -f docker-compose.yaml -f docker-compose.nats.yaml logs --tail=200 retrieval-worker automation-runner terminal-service pipeline-runner
 ```
 
 Passing condition:
 
 - `retrieval-worker` starts in worker-only mode and connects to NATS/JetStream.
+- `automation-runner` starts in automation-runner-only mode and subscribes to the configured automation request subject while owning due-run scheduling.
 - `terminal-service` starts in terminal-service-only mode and registers service-owned runtime records.
 - `pipeline-runner` starts in pipeline-runner-only mode and subscribes to the configured request/reply subject plus durable stage lane.
 
@@ -112,6 +116,7 @@ nats --server "nats://127.0.0.1:${NATS_PORT:-4222}" kv keys owui_registry
 Expected records include service-owned entries for:
 
 - `terminal-service.default`
+- `automation-runner.default`
 - `pipeline-runner.default`
 
 If the NATS CLI is unavailable, use the admin runtime registry endpoint after authenticating as an admin:
@@ -123,7 +128,7 @@ curl -fsS -H "Authorization: Bearer <admin-token>" \
 
 Passing condition:
 
-- terminal and pipeline service records are present and fresh.
+- automation, terminal, and pipeline service records are present and fresh.
 - stale or missing service records are visible diagnostically rather than silently ignored.
 
 ## 5. Exercise Functional Paths

@@ -104,6 +104,12 @@ def test_automation_routes_http_smoke():
     assert body['total'] >= 1
     assert any(item['id'] == created['id'] for item in body['items'])
 
+    run_response = client.post(f"/api/v1/automations/{created['id']}/run")
+    assert run_response.status_code == 200
+    run_body = run_response.json()
+    assert run_body['automation']['id'] == created['id']
+    assert run_body['execution']['status'] == 'accepted'
+
 
 def test_calendar_routes_http_smoke():
     _reset_tables()

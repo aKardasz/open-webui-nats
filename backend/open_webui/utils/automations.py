@@ -26,6 +26,21 @@ def _now_dt():
     return datetime.utcnow()
 
 
+def should_start_local_automation_scheduler(
+    *,
+    enable_automations: bool,
+    nats_url: str,
+    enable_embedded_runner: bool,
+    automation_runner_present: bool,
+    worker_only_mode: bool,
+) -> bool:
+    if worker_only_mode or not enable_automations or automation_runner_present:
+        return False
+    if nats_url:
+        return enable_embedded_runner
+    return True
+
+
 def validate_rrule(rrule_str: str, tz: str = None) -> bool:
     try:
         rule = rrulestr(rrule_str, dtstart=_now_dt())
@@ -59,7 +74,7 @@ def rrule_interval_seconds(rrule_str: str, tz: str = None) -> Optional[int]:
     return int((runs[1] - runs[0]) / 1_000_000_000)
 
 
-def execute_automation(app, automation) -> None:
+def execute_automation(app, automation, *, request_id: str | None = None, trigger: str = 'scheduled') -> None:
     """
     Execute an automation through the existing chat-completion pipeline.
     This remains local execution, but it now uses an explicit scheduler/runner seam
@@ -78,7 +93,12 @@ def execute_automation(app, automation) -> None:
                 event_type='automation.run.started',
                 resource_type='automation',
                 resource_id=automation.id,
-                data={'automation_id': automation.id, 'status': 'started'},
+                data={
+                    'automation_id': automation.id,
+                    'request_id': request_id,
+                    'trigger': trigger,
+                    'status': 'started',
+                },
             ),
         )
 
@@ -170,6 +190,8 @@ def execute_automation(app, automation) -> None:
                 resource_id=automation.id,
                 data={
                     'automation_id': automation.id,
+                    'request_id': request_id,
+                    'trigger': trigger,
                     'status': 'success',
                     'chat_id': chat.id,
                 },
@@ -195,6 +217,8 @@ def execute_automation(app, automation) -> None:
                     resource_id=automation.id,
                     data={
                         'automation_id': automation.id,
+                        'request_id': request_id,
+                        'trigger': trigger,
                         'status': 'error',
                         'error': str(exc),
                     },
@@ -223,7 +247,14 @@ def _build_request(app) -> Request:
     return request
 
 
-def build_automation_runner_service_record(app) -> dict:
+def build_automation_runner_service_record(app, *, execution_mode: str | None = None) -> dict:
+    nats_subject = getattr(
+        app.state,
+        'AUTOMATION_RUNTIME_NATS_SUBJECT',
+        getattr(app.state.config, 'AUTOMATION_NATS_SUBJECT', 'owui.cmd.automation.run'),
+    )
+    mode = execution_mode or getattr(app.state, 'AUTOMATION_RUNTIME_EXECUTION_MODE', 'transitional-local')
+    transport = 'nats-request-reply' if 'nats' in mode else 'in-process'
     return build_custom_runtime_service_record(
         service_id='automation-runner.default',
         service_type='automation-runner',
@@ -231,6 +262,7 @@ def build_automation_runner_service_record(app) -> dict:
         version=VERSION,
         status='healthy' if getattr(app.state.config, 'ENABLE_AUTOMATIONS', False) else 'degraded',
         subjects=[
+            nats_subject,
             AUTOMATION_RUN_STARTED_SUBJECT,
             AUTOMATION_RUN_COMPLETED_SUBJECT,
             AUTOMATION_RUN_FAILED_SUBJECT,
@@ -238,16 +270,26 @@ def build_automation_runner_service_record(app) -> dict:
         capabilities={
             'automations': bool(getattr(app.state.config, 'ENABLE_AUTOMATIONS', False)),
             'calendar': bool(getattr(app.state.config, 'ENABLE_CALENDAR', False)),
-            'execution_mode': 'transitional-local',
+            'automation_runner': True,
+            'transport': transport,
+            'service_owner': 'automation-runner',
+            'execution_mode': mode,
         },
         routing={
             'region': 'local',
             'workspace_scope': 'shared',
+            'owner': 'automation-runner',
         },
     )
 
 
-def register_automation_runtime_provider(app) -> None:
+def register_automation_runtime_provider(app, *, execution_mode: str = 'transitional-local') -> None:
+    app.state.AUTOMATION_RUNTIME_EXECUTION_MODE = execution_mode
+    app.state.AUTOMATION_RUNTIME_NATS_SUBJECT = getattr(
+        app.state.config,
+        'AUTOMATION_NATS_SUBJECT',
+        getattr(app.state, 'AUTOMATION_RUNTIME_NATS_SUBJECT', 'owui.cmd.automation.run'),
+    )
     providers = list(getattr(app.state, 'RUNTIME_SERVICE_RECORD_PROVIDERS', []))
     if any(getattr(provider, '__name__', '') == '_automation_provider' for provider in providers):
         return
@@ -268,7 +310,15 @@ async def scheduler_worker_loop(app) -> None:
             if getattr(app.state.config, 'ENABLE_AUTOMATIONS', False):
                 due = Automations.claim_due(int(time.time_ns()), limit=10)
                 for automation in due:
-                    asyncio.create_task(asyncio.to_thread(execute_automation, app, automation))
+                    asyncio.create_task(
+                        asyncio.to_thread(
+                            execute_automation,
+                            app,
+                            automation,
+                            request_id=f'scheduled-{uuid4().hex}',
+                            trigger='scheduled',
+                        )
+                    )
         except Exception:
             log.exception('Automation scheduler loop iteration failed.')
 

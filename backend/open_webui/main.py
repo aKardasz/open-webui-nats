@@ -491,6 +491,10 @@ from open_webui.env import (
     PIPELINE_NATS_SUBJECT,
     ENABLE_EMBEDDED_PIPELINE_RUNNER,
     PIPELINE_RUNNER_ONLY_MODE,
+    AUTOMATION_NATS_REQUEST_TIMEOUT,
+    AUTOMATION_NATS_SUBJECT,
+    ENABLE_EMBEDDED_AUTOMATION_RUNNER,
+    AUTOMATION_RUNNER_ONLY_MODE,
     ENABLE_EMBEDDED_TERMINAL_SERVICE,
     TERMINAL_SERVICE_ONLY_MODE,
     TERMINAL_CONTROL_REQUEST_TIMEOUT,
@@ -557,9 +561,10 @@ from open_webui.utils.tools import set_tool_servers, set_terminal_servers
 from open_webui.utils.retrieval_worker import should_start_retrieval_worker, start_retrieval_worker_with_retry
 from open_webui.utils.retrieval_transport import build_retrieval_transport
 from open_webui.utils.pipeline_runner import should_start_pipeline_runner, start_pipeline_runner_with_retry
+from open_webui.utils.automation_runner import should_start_automation_runner, start_automation_runner_with_retry
 from open_webui.utils.terminal_service import should_start_terminal_service, start_terminal_service_with_retry
 from open_webui.utils.runtime_registry import periodic_runtime_registry_heartbeat
-from open_webui.utils.automations import register_automation_runtime_provider, scheduler_worker_loop
+from open_webui.utils.automations import should_start_local_automation_scheduler, scheduler_worker_loop
 
 from open_webui.utils.auth import (
     get_license_data,
@@ -710,6 +715,14 @@ async def lifespan(app: FastAPI):
     ):
         app.state.terminal_service = await start_terminal_service_with_retry(app, NATS_URL)
 
+    if should_start_automation_runner(
+        enable_automations=getattr(app.state.config, 'ENABLE_AUTOMATIONS', False),
+        nats_url=NATS_URL,
+        enable_embedded_runner=ENABLE_EMBEDDED_AUTOMATION_RUNNER,
+        automation_runner_only_mode=AUTOMATION_RUNNER_ONLY_MODE,
+    ):
+        app.state.automation_runner = await start_automation_runner_with_retry(app, NATS_URL)
+
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
@@ -718,7 +731,13 @@ async def lifespan(app: FastAPI):
     if not WORKER_ONLY_MODE:
         asyncio.create_task(periodic_usage_pool_cleanup())
         asyncio.create_task(periodic_session_pool_cleanup())
-        if getattr(app.state.config, 'ENABLE_AUTOMATIONS', False):
+        if should_start_local_automation_scheduler(
+            enable_automations=getattr(app.state.config, 'ENABLE_AUTOMATIONS', False),
+            nats_url=NATS_URL,
+            enable_embedded_runner=ENABLE_EMBEDDED_AUTOMATION_RUNNER,
+            automation_runner_present=bool(getattr(app.state, 'automation_runner', None)),
+            worker_only_mode=WORKER_ONLY_MODE,
+        ):
             app.state.automation_scheduler_task = asyncio.create_task(scheduler_worker_loop(app))
         log.info('Startup phase: background housekeeping tasks scheduled.')
 
@@ -838,6 +857,9 @@ async def lifespan(app: FastAPI):
     if getattr(app.state, 'terminal_service', None) is not None:
         await app.state.terminal_service.close()
 
+    if getattr(app.state, 'automation_runner', None) is not None:
+        await app.state.automation_runner.close()
+
     if hasattr(app.state, 'runtime_registry_heartbeat_task'):
         app.state.runtime_registry_heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -947,6 +969,16 @@ app.state.config.PIPELINE_NATS_REQUEST_TIMEOUT = PersistentConfig(
     'nats.pipeline.request_timeout',
     PIPELINE_NATS_REQUEST_TIMEOUT,
 )
+app.state.config.AUTOMATION_NATS_SUBJECT = PersistentConfig(
+    'AUTOMATION_NATS_SUBJECT',
+    'nats.automation.subject',
+    AUTOMATION_NATS_SUBJECT,
+)
+app.state.config.AUTOMATION_NATS_REQUEST_TIMEOUT = PersistentConfig(
+    'AUTOMATION_NATS_REQUEST_TIMEOUT',
+    'nats.automation.request_timeout',
+    AUTOMATION_NATS_REQUEST_TIMEOUT,
+)
 app.state.config.TERMINAL_CONTROL_REQUEST_TIMEOUT = PersistentConfig(
     'TERMINAL_CONTROL_REQUEST_TIMEOUT',
     'nats.terminal.control_request_timeout',
@@ -969,7 +1001,6 @@ app.state.TOOL_SERVERS = []
 app.state.RUNTIME_SERVICE_REGISTRY = []
 app.state.RUNTIME_SERVICE_DISABLED_TYPES = set()
 app.state.RUNTIME_SERVICE_RECORD_PROVIDERS = []
-register_automation_runtime_provider(app)
 
 ########################################
 #

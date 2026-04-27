@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
@@ -54,12 +54,13 @@ async def test_create_new_automation_returns_enriched_response():
     )
 
     with (
+        patch.object(automations_router, '_is_async_db', return_value=True),
         patch.object(automations_router, 'has_permission', return_value=True),
         patch.object(automations_router, 'validate_rrule', return_value=True),
         patch.object(automations_router, 'next_run_ns', return_value=123),
         patch.object(automations_router, 'next_n_runs_ns', return_value=[123, 456]),
-        patch.object(automations_router.Automations, 'insert', return_value=created),
-        patch.object(automations_router.AutomationRuns, 'get_latest', return_value=None),
+        patch.object(automations_router.Automations, 'insert_async', new=AsyncMock(return_value=created)),
+        patch.object(automations_router.AutomationRuns, 'get_latest_async', new=AsyncMock(return_value=None)),
     ):
         response = await automations_router.create_new_automation(request, form, user=user, db=db)
 
@@ -68,7 +69,7 @@ async def test_create_new_automation_returns_enriched_response():
 
 
 @pytest.mark.asyncio
-async def test_run_automation_by_id_schedules_background_task():
+async def test_run_automation_by_id_requests_runner_execution():
     request = _request()
     user = _user()
     db = object()
@@ -87,17 +88,63 @@ async def test_run_automation_by_id_schedules_background_task():
     )
 
     with (
+        patch.object(automations_router, '_is_async_db', return_value=True),
         patch.object(automations_router, 'has_permission', return_value=True),
-        patch.object(automations_router.Automations, 'get_by_id', return_value=automation),
-        patch.object(automations_router.AutomationRuns, 'get_latest', return_value=None),
+        patch.object(automations_router.Automations, 'get_by_id_async', new=AsyncMock(return_value=automation)),
+        patch.object(automations_router.AutomationRuns, 'get_latest_async', new=AsyncMock(return_value=None)),
         patch.object(automations_router, 'next_n_runs_ns', return_value=[123]),
+        patch.object(
+            automations_router,
+            'request_automation_run',
+            new=AsyncMock(return_value={'status': 'accepted', 'request_id': 'req-1', 'owner': 'automation-runner'}),
+        ) as request_run,
     ):
         response = await automations_router.run_automation_by_id(
             request, 'auto-1', background_tasks, user=user, db=db
         )
 
+    assert response['automation'].id == 'auto-1'
+    assert response['execution']['request_id'] == 'req-1'
+    request_run.assert_awaited_once()
+    assert len(background_tasks.tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_automation_routes_fall_back_to_sync_db_when_async_session_is_unavailable():
+    request = _request()
+    user = _user()
+    db = object()
+    form = AutomationForm(
+        name='Daily summary',
+        data=AutomationData(prompt='hello', model_id='model-1', rrule='RRULE:FREQ=DAILY;INTERVAL=1'),
+    )
+    created = AutomationModel(
+        id='auto-1',
+        user_id='user-1',
+        name='Daily summary',
+        data={'prompt': 'hello', 'model_id': 'model-1', 'rrule': 'RRULE:FREQ=DAILY;INTERVAL=1'},
+        meta=None,
+        is_active=True,
+        last_run_at=None,
+        next_run_at=123,
+        created_at=1,
+        updated_at=1,
+    )
+
+    with (
+        patch.object(automations_router, 'AsyncSessionLocal', None),
+        patch.object(automations_router, '_is_async_db', return_value=False),
+        patch.object(automations_router, 'has_permission', return_value=True),
+        patch.object(automations_router, 'validate_rrule', return_value=True),
+        patch.object(automations_router, 'next_run_ns', return_value=123),
+        patch.object(automations_router, 'next_n_runs_ns', return_value=[123, 456]),
+        patch.object(automations_router.Automations, 'insert', return_value=created),
+        patch.object(automations_router.AutomationRuns, 'get_latest', return_value=None),
+    ):
+        response = await automations_router.create_new_automation(request, form, user=user, db=db)
+
     assert response.id == 'auto-1'
-    assert len(background_tasks.tasks) == 1
+    assert response.next_runs == [123, 456]
 
 
 @pytest.mark.asyncio
@@ -178,7 +225,7 @@ async def test_create_calendar_event_uses_calendar_event_table():
         patch.object(
             calendar_router,
             '_check_calendar_access',
-            return_value=CalendarModel(
+            new=AsyncMock(return_value=CalendarModel(
                 id='cal-1',
                 user_id='user-1',
                 name='Personal',
@@ -190,7 +237,7 @@ async def test_create_calendar_event_uses_calendar_event_table():
                 access_grants=[],
                 created_at=1,
                 updated_at=1,
-            ),
+            )),
         ),
         patch.object(calendar_router.CalendarEvents, 'insert_new_event', return_value=event) as insert_event,
     ):

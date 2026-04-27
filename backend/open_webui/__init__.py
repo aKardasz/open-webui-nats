@@ -176,5 +176,31 @@ def terminal_service():
     asyncio.run(_run())
 
 
+@app.command(name='automation-runner')
+def automation_runner():
+    os.environ['WORKER_ONLY_MODE'] = 'true'
+    os.environ['AUTOMATION_RUNNER_ONLY_MODE'] = 'true'
+    os.environ.setdefault('ENABLE_AUTOMATIONS', 'true')
+    os.environ.setdefault('ENABLE_EMBEDDED_AUTOMATION_RUNNER', 'true')
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+    ensure_webui_secret_key()
+
+    async def _run():
+        import open_webui.main
+
+        app_instance = open_webui.main.app
+        async with app_instance.router.lifespan_context(app_instance):
+            if getattr(app_instance.state, 'automation_runner', None) is None:
+                raise RuntimeError('Automation runner failed to start in automation-runner mode.')
+
+            while True:
+                await asyncio.sleep(3600)
+
+    asyncio.run(_run())
+
+
 if __name__ == '__main__':
     app()

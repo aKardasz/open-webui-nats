@@ -5,9 +5,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import BigInteger, Boolean, Column, Index, JSON, Text, UniqueConstraint, delete, func, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from open_webui.internal.db import Base, get_db_context
+from open_webui.internal.db import Base, get_async_db_context, get_db_context
 from open_webui.models.access_grants import AccessGrantModel, AccessGrants
 from open_webui.models.groups import Groups
 from open_webui.models.users import User, UserModel, UserResponse, Users
@@ -325,6 +326,40 @@ class CalendarTable:
         except Exception:
             return False
 
+    async def get_or_create_defaults_async(self, user_id: str, db: Optional[AsyncSession] = None) -> list[CalendarModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.get_or_create_defaults(user_id, db=sync_db))
+
+    async def get_calendars_by_user_async(self, user_id: str, db: Optional[AsyncSession] = None) -> list[CalendarModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.get_calendars_by_user(user_id, db=sync_db))
+
+    async def get_calendar_by_id_async(self, id: str, db: Optional[AsyncSession] = None) -> Optional[CalendarModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.get_calendar_by_id(id, db=sync_db))
+
+    async def insert_new_calendar_async(
+        self, user_id: str, form_data: CalendarForm, db: Optional[AsyncSession] = None
+    ) -> Optional[CalendarModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.insert_new_calendar(user_id, form_data, db=sync_db))
+
+    async def update_calendar_by_id_async(
+        self, id: str, form_data: CalendarUpdateForm, db: Optional[AsyncSession] = None
+    ) -> Optional[CalendarModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.update_calendar_by_id(id, form_data, db=sync_db))
+
+    async def set_default_calendar_async(
+        self, user_id: str, calendar_id: str, db: Optional[AsyncSession] = None
+    ) -> Optional[CalendarModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.set_default_calendar(user_id, calendar_id, db=sync_db))
+
+    async def delete_calendar_by_id_async(self, id: str, db: Optional[AsyncSession] = None) -> bool:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.delete_calendar_by_id(id, db=sync_db))
+
 
 class CalendarEventAttendeeTable:
     def set_attendees(self, event_id: str, attendees: list[dict], db: Optional[Session] = None) -> list[CalendarEventAttendeeModel]:
@@ -367,6 +402,12 @@ class CalendarEventAttendeeTable:
         with get_db_context(db) as db:
             rows = db.query(CalendarEventAttendee).filter(CalendarEventAttendee.event_id == event_id).all()
             return [CalendarEventAttendeeModel.model_validate(r) for r in rows]
+
+    async def update_rsvp_async(
+        self, event_id: str, user_id: str, status: str, db: Optional[AsyncSession] = None
+    ) -> Optional[CalendarEventAttendeeModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.update_rsvp(event_id, user_id, status, db=sync_db))
 
 
 class CalendarEventTable:
@@ -603,6 +644,64 @@ class CalendarEventTable:
                 return True
         except Exception:
             return False
+
+    async def insert_new_event_async(
+        self, user_id: str, form_data: CalendarEventForm, db: Optional[AsyncSession] = None
+    ) -> Optional[CalendarEventModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.insert_new_event(user_id, form_data, db=sync_db))
+
+    async def get_event_by_id_async(self, id: str, db: Optional[AsyncSession] = None) -> Optional[CalendarEventModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.get_event_by_id(id, db=sync_db))
+
+    async def get_events_by_range_async(
+        self,
+        user_id: str,
+        start: int,
+        end: int,
+        calendar_ids: Optional[list[str]] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> list[CalendarEventUserResponse]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(
+                lambda sync_db: self.get_events_by_range(
+                    user_id=user_id,
+                    start=start,
+                    end=end,
+                    calendar_ids=calendar_ids,
+                    db=sync_db,
+                )
+            )
+
+    async def search_events_async(
+        self,
+        user_id: str,
+        query: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 30,
+        db: Optional[AsyncSession] = None,
+    ) -> CalendarEventListResponse:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(
+                lambda sync_db: self.search_events(
+                    user_id=user_id,
+                    query=query,
+                    skip=skip,
+                    limit=limit,
+                    db=sync_db,
+                )
+            )
+
+    async def update_event_by_id_async(
+        self, id: str, form_data: CalendarEventUpdateForm, db: Optional[AsyncSession] = None
+    ) -> Optional[CalendarEventModel]:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.update_event_by_id(id, form_data, db=sync_db))
+
+    async def delete_event_by_id_async(self, id: str, db: Optional[AsyncSession] = None) -> bool:
+        async with get_async_db_context(db) as db:
+            return await db.run_sync(lambda sync_db: self.delete_event_by_id(id, db=sync_db))
 
 
 Calendars = CalendarTable()

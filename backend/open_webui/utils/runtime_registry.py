@@ -25,6 +25,7 @@ ROUTING_MANAGED_SERVICE_PREFIXES = (
     'terminal.',
     'terminal-service.',
     'pipeline-runner.',
+    'automation-runner.',
 )
 
 
@@ -445,7 +446,7 @@ def _runtime_service_record_source_priority(record: dict[str, Any]) -> int:
     if capabilities.get('service_owner') or routing.get('owner'):
         return 2
 
-    if record.get('service_type') in {'terminal-service', 'pipeline-runner'}:
+    if record.get('service_type') in {'terminal-service', 'pipeline-runner', 'automation-runner'}:
         return 2
 
     return 1

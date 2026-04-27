@@ -29,6 +29,7 @@ services:
       - 'WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY-nats-smoke-secret}'
       - 'ENABLE_EMBEDDED_RETRIEVAL_WORKER=false'
       - 'ENABLE_EMBEDDED_PIPELINE_RUNNER=false'
+      - 'ENABLE_EMBEDDED_AUTOMATION_RUNNER=false'
       - 'ENABLE_EMBEDDED_TERMINAL_SERVICE=false'
     depends_on:
       nats:
@@ -76,6 +77,32 @@ services:
       - 'PIPELINE_INTERNAL_TRANSPORT=nats'
       - 'ENABLE_EMBEDDED_PIPELINE_RUNNER=true'
       - 'PIPELINE_RUNNER_ONLY_MODE=true'
+      - 'WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY-nats-smoke-secret}'
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      nats:
+        condition: service_healthy
+      open-webui:
+        condition: service_healthy
+    restart: unless-stopped
+
+  automation-runner:
+    healthcheck:
+      disable: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USE_SLIM: ${NATS_SMOKE_USE_SLIM-true}
+    image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-main}
+    container_name: open-webui-automation-runner
+    command: ["python", "-m", "open_webui", "automation-runner"]
+    environment:
+      - 'NATS_URL=nats://nats:4222'
+      - 'ENABLE_AUTOMATIONS=true'
+      - 'ENABLE_EMBEDDED_AUTOMATION_RUNNER=true'
+      - 'AUTOMATION_RUNNER_ONLY_MODE=true'
       - 'WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY-nats-smoke-secret}'
     volumes:
       - open-webui:/app/backend/data

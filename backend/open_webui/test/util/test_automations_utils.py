@@ -1,19 +1,21 @@
 import asyncio
 from types import SimpleNamespace
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
+from open_webui.models.automations import Automations
 from open_webui.utils.automations import (
     AUTOMATION_RUN_FAILED_SUBJECT,
-    AUTOMATION_RUN_STARTED_SUBJECT,
     AUTOMATION_RUN_COMPLETED_SUBJECT,
+    AUTOMATION_RUN_STARTED_SUBJECT,
     build_automation_runner_service_record,
     execute_automation,
     next_n_runs_ns,
     register_automation_runtime_provider,
     rrule_interval_seconds,
     scheduler_worker_loop,
+    should_start_local_automation_scheduler,
     validate_rrule,
 )
 
@@ -26,6 +28,7 @@ def _app():
             config=SimpleNamespace(
                 ENABLE_AUTOMATIONS=True,
                 ENABLE_CALENDAR=True,
+                AUTOMATION_NATS_SUBJECT='owui.cmd.automation.run',
             ),
         )
     )
@@ -59,10 +62,122 @@ def test_register_automation_runtime_provider_adds_single_provider():
     assert record[0]['service_type'] == 'automation-runner'
 
 
-def test_build_automation_runner_service_record_reports_transitional_execution_mode():
+def test_build_automation_runner_service_record_reports_service_owner_metadata():
     record = build_automation_runner_service_record(_app())
     assert record['service_id'] == 'automation-runner.default'
     assert record['capabilities']['execution_mode'] == 'transitional-local'
+    assert record['capabilities']['service_owner'] == 'automation-runner'
+    assert record['routing']['owner'] == 'automation-runner'
+    assert 'owui.cmd.automation.run' in record['subjects']
+
+
+def test_should_start_local_automation_scheduler_only_in_local_or_embedded_modes():
+    assert should_start_local_automation_scheduler(
+        enable_automations=True,
+        nats_url='',
+        enable_embedded_runner=False,
+        automation_runner_present=False,
+        worker_only_mode=False,
+    )
+    assert should_start_local_automation_scheduler(
+        enable_automations=True,
+        nats_url='nats://nats:4222',
+        enable_embedded_runner=True,
+        automation_runner_present=False,
+        worker_only_mode=False,
+    )
+    assert not should_start_local_automation_scheduler(
+        enable_automations=True,
+        nats_url='nats://nats:4222',
+        enable_embedded_runner=False,
+        automation_runner_present=False,
+        worker_only_mode=False,
+    )
+    assert not should_start_local_automation_scheduler(
+        enable_automations=True,
+        nats_url='nats://nats:4222',
+        enable_embedded_runner=True,
+        automation_runner_present=True,
+        worker_only_mode=False,
+    )
+
+
+def test_claim_due_only_returns_rows_that_win_compare_and_swap_update():
+    row = SimpleNamespace(
+        id='auto-1',
+        user_id='user-1',
+        name='Daily summary',
+        data={'rrule': 'RRULE:FREQ=DAILY;INTERVAL=1'},
+        meta=None,
+        is_active=True,
+        last_run_at=None,
+        next_run_at=10,
+        created_at=1,
+        updated_at=1,
+    )
+    query = SimpleNamespace(
+        filter=lambda *args, **kwargs: query,
+        order_by=lambda *args, **kwargs: query,
+        limit=lambda *args, **kwargs: query,
+        all=lambda: [row],
+    )
+    db = SimpleNamespace(
+        query=lambda *args, **kwargs: query,
+        execute=lambda *args, **kwargs: SimpleNamespace(rowcount=1),
+        commit=lambda: None,
+    )
+
+    @contextmanager
+    def fake_db_context(_db):
+        yield db
+
+    with (
+        patch('open_webui.models.automations.get_db_context', fake_db_context),
+        patch('open_webui.utils.automations.next_run_ns', return_value=20),
+    ):
+        claimed = Automations.claim_due(10, db=db)
+
+    assert len(claimed) == 1
+    assert claimed[0].last_run_at == 10
+    assert claimed[0].next_run_at == 20
+
+
+def test_claim_due_skips_rows_that_lose_compare_and_swap_update():
+    row = SimpleNamespace(
+        id='auto-1',
+        user_id='user-1',
+        name='Daily summary',
+        data={'rrule': 'RRULE:FREQ=DAILY;INTERVAL=1'},
+        meta=None,
+        is_active=True,
+        last_run_at=None,
+        next_run_at=10,
+        created_at=1,
+        updated_at=1,
+    )
+    query = SimpleNamespace(
+        filter=lambda *args, **kwargs: query,
+        order_by=lambda *args, **kwargs: query,
+        limit=lambda *args, **kwargs: query,
+        all=lambda: [row],
+    )
+    db = SimpleNamespace(
+        query=lambda *args, **kwargs: query,
+        execute=lambda *args, **kwargs: SimpleNamespace(rowcount=0),
+        commit=lambda: None,
+    )
+
+    @contextmanager
+    def fake_db_context(_db):
+        yield db
+
+    with (
+        patch('open_webui.models.automations.get_db_context', fake_db_context),
+        patch('open_webui.utils.automations.next_run_ns', return_value=20),
+    ):
+        claimed = Automations.claim_due(10, db=db)
+
+    assert claimed == []
 
 
 def test_execute_automation_records_failed_run_and_emits_events():
@@ -78,6 +193,7 @@ def test_execute_automation_records_failed_run_and_emits_events():
     assert publish_event.call_count == 2
     assert publish_event.call_args_list[0].args[1] == AUTOMATION_RUN_STARTED_SUBJECT
     assert publish_event.call_args_list[1].args[1] == AUTOMATION_RUN_FAILED_SUBJECT
+    assert publish_event.call_args_list[0].args[2]['data']['trigger'] == 'scheduled'
 
 
 def test_execute_automation_success_creates_chat_and_emits_completed_event():
@@ -107,6 +223,7 @@ def test_execute_automation_success_creates_chat_and_emits_completed_event():
     assert publish_event.call_count == 2
     assert publish_event.call_args_list[0].args[1] == AUTOMATION_RUN_STARTED_SUBJECT
     assert publish_event.call_args_list[1].args[1] == AUTOMATION_RUN_COMPLETED_SUBJECT
+    assert publish_event.call_args_list[1].args[2]['data']['trigger'] == 'scheduled'
 
 
 @pytest.mark.asyncio

@@ -186,11 +186,15 @@ This adds a local NATS server with JetStream enabled and keeps the existing Redi
 
 The overlay now also includes a dedicated `retrieval-worker` service and disables embedded retrieval-worker startup in the `open-webui` service. The worker runs via `python -m open_webui retrieval-worker`, which starts the retrieval consumer in worker-only mode while the web process remains browser-facing.
 
+For NATS-owned automation execution, the overlay also disables embedded automation-runner startup in the `open-webui` service. The dedicated runner starts via `python -m open_webui automation-runner` and owns both manual automation run requests (via Core NATS request/reply) and due-schedule polling in NATS mode.
+
 The current NATS port also includes upstream-derived automation and calendar backend slices plus transitional runner seams for internal execution. To enable those feature surfaces locally, add the following flags to your environment:
 
 ```bash
 ENABLE_AUTOMATIONS=true
 ENABLE_CALENDAR=true
+ENABLE_EMBEDDED_AUTOMATION_RUNNER=true
+AUTOMATION_NATS_SUBJECT=owui.cmd.automation.run
 ```
 
 Optional automation limits:

@@ -4,10 +4,11 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.internal.db import get_session
+from open_webui.internal.db import AsyncSessionLocal, get_async_session, get_db_context
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.automations import AutomationRuns, Automations
 from open_webui.models.calendar import (
@@ -34,6 +35,21 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 SCHEDULED_TASKS_CALENDAR_ID = '__scheduled_tasks__'
+CalendarDbSession = AsyncSession | Session
+
+
+def _is_async_db(db) -> bool:
+    return isinstance(db, AsyncSession)
+
+
+async def get_calendar_session():
+    if AsyncSessionLocal is None:
+        with get_db_context() as db:
+            yield db
+        return
+
+    async for db in get_async_session():
+        yield db
 
 
 def check_calendar_permission(request: Request, user):
@@ -51,8 +67,14 @@ def _user_has_automations(request: Request, user) -> bool:
     return has_permission(user.id, 'features.automations', request.app.state.config.USER_PERMISSIONS)
 
 
-def _check_calendar_access(calendar_id: str, user: UserModel, permission: str = 'write', db: Optional[Session] = None) -> CalendarModel:
-    cal = Calendars.get_calendar_by_id(calendar_id, db=db)
+async def _check_calendar_access(
+    calendar_id: str, user: UserModel, permission: str = 'write', db: Optional[CalendarDbSession] = None
+) -> CalendarModel:
+    cal = (
+        await Calendars.get_calendar_by_id_async(calendar_id, db=db)
+        if _is_async_db(db)
+        else Calendars.get_calendar_by_id(calendar_id, db=db)
+    )
     if not cal:
         raise HTTPException(status_code=404, detail='Calendar not found')
     if cal.user_id == user.id or user.role == 'admin':
@@ -75,10 +97,14 @@ def _check_calendar_access(calendar_id: str, user: UserModel, permission: str = 
 async def get_calendars(
     request: Request,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    calendars = Calendars.get_calendars_by_user(user.id, db=db)
+    calendars = (
+        await Calendars.get_calendars_by_user_async(user.id, db=db)
+        if _is_async_db(db)
+        else Calendars.get_calendars_by_user(user.id, db=db)
+    )
 
     if _user_has_automations(request, user):
         now = int(time.time_ns())
@@ -103,10 +129,14 @@ async def create_calendar(
     request: Request,
     form_data: CalendarForm,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    return Calendars.insert_new_calendar(user.id, form_data, db=db)
+    return (
+        await Calendars.insert_new_calendar_async(user.id, form_data, db=db)
+        if _is_async_db(db)
+        else Calendars.insert_new_calendar(user.id, form_data, db=db)
+    )
 
 
 @router.get('/events')
@@ -116,7 +146,7 @@ async def get_events(
     end: str,
     calendar_ids: Optional[str] = None,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
 
@@ -131,12 +161,22 @@ async def get_events(
     end_ns = int(end_dt.timestamp() * 1000) * NS
     cal_id_list = calendar_ids.split(',') if calendar_ids else None
 
-    events = CalendarEvents.get_events_by_range(
-        user_id=user.id,
-        start=start_ns,
-        end=end_ns,
-        calendar_ids=cal_id_list,
-        db=db,
+    events = (
+        await CalendarEvents.get_events_by_range_async(
+            user_id=user.id,
+            start=start_ns,
+            end=end_ns,
+            calendar_ids=cal_id_list,
+            db=db,
+        )
+        if _is_async_db(db)
+        else CalendarEvents.get_events_by_range(
+            user_id=user.id,
+            start=start_ns,
+            end=end_ns,
+            calendar_ids=cal_id_list,
+            db=db,
+        )
     )
 
     expanded = []
@@ -152,7 +192,12 @@ async def get_events(
     if _user_has_automations(request, user) and (cal_id_list is None or SCHEDULED_TASKS_CALENDAR_ID in cal_id_list):
         try:
             active_automations = [
-                a for a in Automations.search_automations(user.id, status='active', skip=0, limit=500, db=db).items
+                a
+                for a in (
+                    await Automations.search_automations_async(user.id, status='active', skip=0, limit=500, db=db)
+                    if _is_async_db(db)
+                    else Automations.search_automations(user.id, status='active', skip=0, limit=500, db=db)
+                ).items
                 if a.is_active
             ]
             for auto in active_automations:
@@ -189,7 +234,11 @@ async def get_events(
 
             # Minimal past runs view
             for auto in active_automations:
-                runs = AutomationRuns.get_by_automation(auto.id, skip=0, limit=200, db=db)
+                runs = (
+                    await AutomationRuns.get_by_automation_async(auto.id, skip=0, limit=200, db=db)
+                    if _is_async_db(db)
+                    else AutomationRuns.get_by_automation(auto.id, skip=0, limit=200, db=db)
+                )
                 for run in runs:
                     if start_ns <= run.created_at <= end_ns:
                         expanded.append(
@@ -229,11 +278,15 @@ async def create_event(
     request: Request,
     form_data: CalendarEventForm,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    _check_calendar_access(form_data.calendar_id, user, 'write', db=db)
-    return CalendarEvents.insert_new_event(user.id, form_data, db=db)
+    await _check_calendar_access(form_data.calendar_id, user, 'write', db=db)
+    return (
+        await CalendarEvents.insert_new_event_async(user.id, form_data, db=db)
+        if _is_async_db(db)
+        else CalendarEvents.insert_new_event(user.id, form_data, db=db)
+    )
 
 
 @router.get('/events/search', response_model=CalendarEventListResponse)
@@ -243,10 +296,14 @@ async def search_events(
     skip: int = 0,
     limit: int = 30,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    return CalendarEvents.search_events(user_id=user.id, query=query, skip=skip, limit=limit, db=db)
+    return (
+        await CalendarEvents.search_events_async(user_id=user.id, query=query, skip=skip, limit=limit, db=db)
+        if _is_async_db(db)
+        else CalendarEvents.search_events(user_id=user.id, query=query, skip=skip, limit=limit, db=db)
+    )
 
 
 @router.get('/events/{event_id}', response_model=CalendarEventModel)
@@ -254,13 +311,17 @@ async def get_event(
     request: Request,
     event_id: str,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    event = CalendarEvents.get_event_by_id(event_id, db=db)
+    event = (
+        await CalendarEvents.get_event_by_id_async(event_id, db=db)
+        if _is_async_db(db)
+        else CalendarEvents.get_event_by_id(event_id, db=db)
+    )
     if not event:
         raise HTTPException(status_code=404, detail='Event not found')
-    _check_calendar_access(event.calendar_id, user, 'read', db=db)
+    await _check_calendar_access(event.calendar_id, user, 'read', db=db)
     return event
 
 
@@ -270,14 +331,22 @@ async def update_event(
     event_id: str,
     form_data: CalendarEventUpdateForm,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    event = CalendarEvents.get_event_by_id(event_id, db=db)
+    event = (
+        await CalendarEvents.get_event_by_id_async(event_id, db=db)
+        if _is_async_db(db)
+        else CalendarEvents.get_event_by_id(event_id, db=db)
+    )
     if not event:
         raise HTTPException(status_code=404, detail='Event not found')
-    _check_calendar_access(event.calendar_id, user, 'write', db=db)
-    updated = CalendarEvents.update_event_by_id(event_id, form_data, db=db)
+    await _check_calendar_access(event.calendar_id, user, 'write', db=db)
+    updated = (
+        await CalendarEvents.update_event_by_id_async(event_id, form_data, db=db)
+        if _is_async_db(db)
+        else CalendarEvents.update_event_by_id(event_id, form_data, db=db)
+    )
     if not updated:
         raise HTTPException(status_code=500, detail='Failed to update')
     return updated
@@ -288,14 +357,22 @@ async def delete_event(
     request: Request,
     event_id: str,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    event = CalendarEvents.get_event_by_id(event_id, db=db)
+    event = (
+        await CalendarEvents.get_event_by_id_async(event_id, db=db)
+        if _is_async_db(db)
+        else CalendarEvents.get_event_by_id(event_id, db=db)
+    )
     if not event:
         raise HTTPException(status_code=404, detail='Event not found')
-    _check_calendar_access(event.calendar_id, user, 'write', db=db)
-    result = CalendarEvents.delete_event_by_id(event_id, db=db)
+    await _check_calendar_access(event.calendar_id, user, 'write', db=db)
+    result = (
+        await CalendarEvents.delete_event_by_id_async(event_id, db=db)
+        if _is_async_db(db)
+        else CalendarEvents.delete_event_by_id(event_id, db=db)
+    )
     if not result:
         raise HTTPException(status_code=500, detail='Failed to delete')
     return {'status': True}
@@ -307,12 +384,16 @@ async def rsvp_event(
     event_id: str,
     form_data: RSVPForm,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
     if form_data.status not in ('accepted', 'declined', 'tentative', 'pending'):
         raise HTTPException(status_code=400, detail='Invalid status')
-    result = CalendarEventAttendees.update_rsvp(event_id, user.id, form_data.status, db=db)
+    result = (
+        await CalendarEventAttendees.update_rsvp_async(event_id, user.id, form_data.status, db=db)
+        if _is_async_db(db)
+        else CalendarEventAttendees.update_rsvp(event_id, user.id, form_data.status, db=db)
+    )
     if not result:
         raise HTTPException(status_code=404, detail='Not an attendee of this event')
     return {'status': True, 'rsvp': result.status}
@@ -323,10 +404,10 @@ async def get_calendar_by_id(
     request: Request,
     calendar_id: str,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    return _check_calendar_access(calendar_id, user, 'read', db=db)
+    return await _check_calendar_access(calendar_id, user, 'read', db=db)
 
 
 @router.post('/{calendar_id}/update', response_model=CalendarModel)
@@ -335,13 +416,17 @@ async def update_calendar(
     calendar_id: str,
     form_data: CalendarUpdateForm,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    cal = _check_calendar_access(calendar_id, user, 'write', db=db)
+    cal = await _check_calendar_access(calendar_id, user, 'write', db=db)
     if form_data.access_grants is not None and cal.user_id != user.id and user.role != 'admin':
         raise HTTPException(status_code=403, detail='Only owner can manage sharing')
-    updated = Calendars.update_calendar_by_id(calendar_id, form_data, db=db)
+    updated = (
+        await Calendars.update_calendar_by_id_async(calendar_id, form_data, db=db)
+        if _is_async_db(db)
+        else Calendars.update_calendar_by_id(calendar_id, form_data, db=db)
+    )
     if not updated:
         raise HTTPException(status_code=500, detail='Failed to update')
     return updated
@@ -352,13 +437,17 @@ async def delete_calendar(
     request: Request,
     calendar_id: str,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    cal = _check_calendar_access(calendar_id, user, 'write', db=db)
+    cal = await _check_calendar_access(calendar_id, user, 'write', db=db)
     if cal.user_id != user.id and user.role != 'admin':
         raise HTTPException(status_code=403, detail='Only owner can delete calendar')
-    result = Calendars.delete_calendar_by_id(calendar_id, db=db)
+    result = (
+        await Calendars.delete_calendar_by_id_async(calendar_id, db=db)
+        if _is_async_db(db)
+        else Calendars.delete_calendar_by_id(calendar_id, db=db)
+    )
     if not result:
         raise HTTPException(status_code=500, detail='Failed to delete')
     return {'status': True}
@@ -369,10 +458,14 @@ async def set_default_calendar(
     request: Request,
     calendar_id: str,
     user: UserModel = Depends(get_verified_user),
-    db: Session = Depends(get_session),
+    db: CalendarDbSession = Depends(get_calendar_session),
 ):
     check_calendar_permission(request, user)
-    cal = Calendars.set_default_calendar(user.id, calendar_id, db=db)
+    cal = (
+        await Calendars.set_default_calendar_async(user.id, calendar_id, db=db)
+        if _is_async_db(db)
+        else Calendars.set_default_calendar(user.id, calendar_id, db=db)
+    )
     if not cal:
         raise HTTPException(status_code=404, detail='Calendar not found')
     return cal
