@@ -82,6 +82,25 @@ async def test_request_automation_run_uses_nats_request_when_available():
 
 
 @pytest.mark.asyncio
+async def test_request_automation_run_does_not_fallback_locally_when_nats_runner_unavailable():
+    app = _app(nats_url='nats://nats:4222')
+    background_tasks = SimpleNamespace(tasks=[], add_task=lambda fn, *args, **kwargs: background_tasks.tasks.append((fn, args, kwargs)))
+    nc = SimpleNamespace(request=AsyncMock(side_effect=TimeoutError('no responders')), drain=AsyncMock())
+
+    with (
+        patch('open_webui.utils.automation_runner._connect_nats', AsyncMock(return_value=nc)),
+        patch('open_webui.utils.automation_runner.execute_automation') as execute_automation,
+    ):
+        with pytest.raises(RuntimeError, match='Automation runner unavailable'):
+            await request_automation_run(app, _automation(), background_tasks=background_tasks)
+
+    assert background_tasks.tasks == []
+    execute_automation.assert_not_called()
+    nc.request.assert_awaited_once()
+    nc.drain.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_automation_runner_request_payload_accepts_valid_job():
     app = _app(nats_url='nats://nats:4222')
     runner = AutomationRunner(app, 'nats://nats:4222', 'instance-1')

@@ -4,10 +4,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from open_webui.utils.terminal_service import (
+    TERMINAL_CONFIG_REFRESH_SUBJECT,
     TERMINAL_SESSION_ATTACH_SUBJECT,
     TERMINAL_SESSION_CREATE_SUBJECT,
     TerminalService,
     build_terminal_service_records,
+    publish_terminal_config_refresh,
     request_terminal_lifecycle_control,
     should_start_terminal_service,
     start_terminal_service_with_retry,
@@ -57,7 +59,7 @@ class FakeNatsResponse:
 class FakeNatsConnection:
     def __init__(self, payload=None):
         self._payload = payload
-        self.subscribe = AsyncMock(side_effect=[FakeSubscription() for _ in range(6)])
+        self.subscribe = AsyncMock(side_effect=[FakeSubscription() for _ in range(7)])
         self.request = AsyncMock(return_value=FakeNatsResponse(payload))
         self.drain = AsyncMock()
 
@@ -124,10 +126,36 @@ async def test_terminal_service_start_disables_web_owned_terminal_records_and_pr
     assert started is True
     assert 'terminal' in app.state.RUNTIME_SERVICE_DISABLED_TYPES
     assert len(app.state.RUNTIME_SERVICE_RECORD_PROVIDERS) == 1
-    assert fake_nc.subscribe.await_count == 6
+    assert fake_nc.subscribe.await_count == 7
     await service.close()
     assert app.state.RUNTIME_SERVICE_RECORD_PROVIDERS == []
     fake_nc.drain.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_service_config_refresh_updates_connections_without_restart():
+    app = _app()
+    service = TerminalService(app, 'nats://nats:4222')
+    refreshed_servers = [{'id': 'server-2', 'url': 'http://runtime-2.example'}]
+    connections = [{'id': 'server-2', 'url': 'http://configured-2.example', 'enabled': True}]
+
+    with patch(
+        'open_webui.utils.terminal_service.set_terminal_servers',
+        new=AsyncMock(return_value=refreshed_servers),
+    ) as refresh:
+        result = await service.handle_config_refresh_request(
+            {'terminal_server_connections': connections}
+        )
+
+    assert result == {
+        'status': 'ok',
+        'data': {
+            'terminal_server_count': 1,
+            'cached_terminal_count': 1,
+        },
+    }
+    assert app.state.config.TERMINAL_SERVER_CONNECTIONS == connections
+    refresh.assert_awaited_once()
 
 
 def test_terminal_service_handle_control_request_prefers_runtime_route():
@@ -256,6 +284,25 @@ async def test_request_terminal_lifecycle_control_uses_attach_subject():
 
     assert fake_nc.request.await_args.args[0] == TERMINAL_SESSION_ATTACH_SUBJECT
     assert b'"session_id": "session-1"' in fake_nc.request.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_publish_terminal_config_refresh_uses_refresh_subject():
+    app = _app()
+    fake_nc = FakeNatsConnection(payload=b'{"status":"ok","data":{"cached_terminal_count":1}}')
+    connections = [{'id': 'server-2', 'url': 'http://configured-2.example', 'enabled': True}]
+
+    with patch('open_webui.utils.terminal_service._connect_nats', new=AsyncMock(return_value=fake_nc)):
+        result = await publish_terminal_config_refresh(
+            app,
+            terminal_server_connections=connections,
+        )
+
+    assert result == {'status': 'ok', 'data': {'cached_terminal_count': 1}}
+    fake_nc.request.assert_awaited_once()
+    assert fake_nc.request.await_args.args[0] == TERMINAL_CONFIG_REFRESH_SUBJECT
+    assert b'"terminal_server_connections"' in fake_nc.request.await_args.args[1]
+    fake_nc.drain.assert_awaited_once()
 
 
 @pytest.mark.asyncio

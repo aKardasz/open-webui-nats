@@ -53,6 +53,7 @@ from open_webui.utils.payload import (
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+PIPELINE_STAGE_JOB_STREAM = 'owui_pipeline_jobs'
 PIPELINE_STAGE_JOB_SUBJECT = 'owui.cmd.pipeline.stage.run'
 
 
@@ -184,7 +185,7 @@ async def request_function_chat_completion_via_runner(request, form_data, user, 
     pipe_id = form_data['model'].split('.', 1)[0]
     pipe_meta = model.get('pipe', {'type': 'pipe'})
     envelope = {
-        'trace_id': f'trace_pipe_{pipe_id}',
+        'trace_id': f'trace_pipe_{pipe_id}_{uuid4().hex}',
         'payload_version': 'v1',
         'payload': {
             'pipeline_id': form_data['model'],
@@ -216,12 +217,17 @@ async def request_function_chat_completion_via_runner(request, form_data, user, 
         if is_durable_pipe_model(model):
             reply_subject = f'owui.reply.pipeline.stage.{uuid4().hex}'
             subscription = await nc.subscribe(reply_subject)
-            await nc.jetstream().publish(
-                PIPELINE_STAGE_JOB_SUBJECT,
-                json.dumps({**envelope, 'reply_subject': reply_subject}).encode('utf-8'),
-            )
-            response = await subscription.next_msg(timeout=timeout)
-            await subscription.unsubscribe()
+            try:
+                if hasattr(nc, 'flush'):
+                    await nc.flush()
+                await nc.jetstream().publish(
+                    PIPELINE_STAGE_JOB_SUBJECT,
+                    json.dumps({**envelope, 'reply_subject': reply_subject}).encode('utf-8'),
+                    stream=PIPELINE_STAGE_JOB_STREAM,
+                )
+                response = await subscription.next_msg(timeout=timeout)
+            finally:
+                await subscription.unsubscribe()
         else:
             response = await nc.request(
                 getattr(request.app.state.config, 'PIPELINE_NATS_SUBJECT', 'owui.cmd.pipeline.run'),

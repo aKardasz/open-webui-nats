@@ -20,13 +20,15 @@ Official references:
 - [JetStream Overview](https://docs.nats.io/nats-concepts/jetstream)
 - [KV](https://docs.nats.io/nats-concepts/jetstream/key-value-store)
 - [Object Store](https://docs.nats.io/nats-concepts/jetstream/obj_store)
+- [Services](https://docs.nats.io/using-nats/developer/services)
 
 ## Service Taxonomy
 
 The initial internal service identities are:
 
-- `terminal`
+- `terminal-service`
 - `pipeline-runner`
+- `automation-runner`
 - `retrieval-worker`
 - `artifact-worker`
 - `tool-executor`
@@ -36,10 +38,12 @@ These names should be treated as stable service-family identifiers even if multi
 
 Recommended responsibilities:
 
-- `terminal`
-  Owns terminal lifecycle events, terminal capability metadata, and future terminal fleet registration. It does not replace browser WebSocket transport in v1.
+- `terminal-service`
+  Owns terminal lifecycle control, terminal capability metadata, runtime registration, and future terminal fleet coordination. It does not replace browser WebSocket transport in v1.
 - `pipeline-runner`
   Owns pipeline-stage execution that can run outside the web process. It supports fast RPC for synchronous internal filters and JetStream jobs for longer-running stages.
+- `automation-runner`
+  Owns manual automation run requests, due-schedule polling, automation execution lifecycle, and runtime registration when Open WebUI is in NATS-owned automation mode.
 - `retrieval-worker`
   Owns file ingestion, OCR or transcription, chunking, embeddings, indexing, and retryable knowledge-processing jobs.
 - `artifact-worker`
@@ -68,6 +72,7 @@ Suggested initial domains:
 - `task`
 - `terminal`
 - `pipeline`
+- `automation`
 - `retrieval`
 - `artifact`
 - `registry`
@@ -78,10 +83,13 @@ Examples:
 
 - `owui.cmd.task.stop`
 - `owui.cmd.pipeline.run`
+- `owui.cmd.pipeline.stage.run`
 - `owui.cmd.terminal.session.create`
+- `owui.cmd.automation.run`
 - `owui.evt.terminal.session.created`
 - `owui.evt.retrieval.job.progress`
 - `owui.evt.pipeline.completed`
+- `owui.evt.automation.run.completed`
 - `owui.evt.chat.tool_invoked`
 
 Official references:
@@ -118,7 +126,7 @@ Field rules:
 - `actor_id`
   Required for auditability when an actor exists.
 - `resource_id`
-  Required when the job is about a specific file, chat, session, or artifact.
+  Required when the job is about a specific file, chat, session, artifact, or automation run.
 - `requested_at`
   Required UTC timestamp.
 - `reply_to`
@@ -172,9 +180,9 @@ The registry should materialize a normalized service record in KV. Initial recor
 
 ```json
 {
-  "service_id": "terminal.primary",
-  "service_type": "terminal",
-  "instance_id": "terminal-7f58b9d9d4-x2r9q",
+  "service_id": "terminal-service.default",
+  "service_type": "terminal-service",
+  "instance_id": "terminal-service-7f58b9d9d4-x2r9q",
   "version": "1.0.0",
   "status": "healthy",
   "subjects": [
@@ -221,6 +229,7 @@ Required partitioning rules:
 - terminal session events partition by `session_id`
 - retrieval progress events partition by `job_id`
 - long-running pipeline progress events partition by `job_id`
+- automation run progress or status events partition by `request_id` or `run_id`
 - artifact build progress events partition by `job_id`
 - if chat-scoped ordering is ever needed for non-token side effects, partition by `chat_id`
 
@@ -229,6 +238,7 @@ Example subject patterns:
 - `owui.evt.terminal.session.<session_id>.status`
 - `owui.evt.retrieval.job.<job_id>.progress`
 - `owui.evt.pipeline.job.<job_id>.progress`
+- `owui.evt.automation.run.<run_id>.status`
 
 Official references:
 
@@ -258,137 +268,7 @@ Envelope:
   "payload": {
     "file_id": "file_123",
     "content_type": "application/pdf",
-    "storage_path": "uploads/file_123.pdf",
-    "knowledge_id": "knowledge_9"
+    "storage_path": "uploads/file_123.pdf"
   }
 }
 ```
-
-Expected event sequence:
-
-- `owui.evt.retrieval.job.accepted`
-- `owui.evt.retrieval.job.started`
-- `owui.evt.retrieval.job.progress`
-- `owui.evt.retrieval.job.completed`
-
-### Example: Pipeline Request/Reply Call
-
-Request subject:
-
-- `owui.cmd.pipeline.run`
-
-Reply behavior:
-
-- Use Core NATS request/reply for short-running, synchronous pipeline stages.
-
-Request:
-
-```json
-{
-  "trace_id": "trace_pipeline_456",
-  "payload_version": "v1",
-  "payload": {
-    "pipeline_id": "content_filter",
-    "model": "gpt-4.1",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Hello"
-      }
-    ]
-  }
-}
-```
-
-Reply:
-
-```json
-{
-  "trace_id": "trace_pipeline_456",
-  "payload_version": "v1",
-  "status": "ok",
-  "data": {
-    "messages": [
-      {
-        "role": "user",
-        "content": "Hello"
-      }
-    ]
-  }
-}
-```
-
-### Example: Terminal Session Lifecycle Event
-
-Event subject:
-
-- `owui.evt.terminal.session.created`
-
-Event:
-
-```json
-{
-  "event_id": "evt_term_001",
-  "event_type": "terminal.session.created",
-  "occurred_at": "2026-04-15T20:15:00Z",
-  "producer": "terminal",
-  "resource_type": "terminal_session",
-  "resource_id": "sess_001",
-  "trace_id": "trace_term_001",
-  "data": {
-    "session_id": "sess_001",
-    "server_id": "terminal-primary",
-    "user_id": "user_42"
-  }
-}
-```
-
-This event can be fanned out by the web tier without moving raw terminal transport off WebSocket.
-
-### Example: Service Registration Heartbeat
-
-KV bucket:
-
-- `owui_registry`
-
-Key:
-
-- `service/terminal/terminal.primary/terminal-7f58b9d9d4-x2r9q`
-
-Value:
-
-```json
-{
-  "service_id": "terminal.primary",
-  "service_type": "terminal",
-  "instance_id": "terminal-7f58b9d9d4-x2r9q",
-  "version": "1.0.0",
-  "status": "healthy",
-  "subjects": [
-    "owui.cmd.terminal.session.create"
-  ],
-  "capabilities": {
-    "terminal": true
-  },
-  "routing": {
-    "region": "local"
-  },
-  "observed_at": "2026-04-15T20:20:00Z"
-}
-```
-
-## Failure-Handling Defaults
-
-These defaults should be treated as part of the contract model:
-
-- Core NATS messages may be lost if no responder is available or if the flow is not durable by design. Use JetStream when loss is unacceptable.
-- Durable jobs must be idempotent because JetStream redelivery can produce duplicate execution attempts.
-- Slow consumers must not be allowed on hot subjects that carry user-visible live traffic.
-- Registry entries must expire or be overwritten by fresh heartbeats to avoid stale routing.
-- The web tier must remain tolerant of missed progress events by being able to read final state from the DB.
-
-Official references:
-
-- [Slow Consumers](https://docs.nats.io/running-a-nats-service/nats_admin/slow_consumers)
-- [JetStream Consumers](https://docs.nats.io/nats-concepts/jetstream/consumers)
-- [Request/Reply](https://docs.nats.io/nats-concepts/core-nats/reqreply)

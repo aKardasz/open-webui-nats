@@ -8,12 +8,14 @@ The target deployment keeps the web application as the browser and auth edge, th
 
 - `open-webui-web`
   Owns HTTP, WebSocket, Socket.IO, auth, access control, browser state fanout, and compatibility endpoints.
-- `terminal`
+- `terminal-service`
   Owns terminal fleet registration, terminal lifecycle control, and session events. Raw browser terminal transport still terminates at the web edge in the early service-first state.
 - `retrieval-worker`
   Owns ingestion, OCR or transcription, chunking, embeddings, indexing, and other durable retrieval work.
 - `pipeline-runner`
   Owns modular pipeline execution with fast request/reply for synchronous internal stages and JetStream jobs for long-running stages.
+- `automation-runner`
+  Owns automation run requests, due-schedule polling, execution lifecycle, and runtime registration in NATS-owned automation mode.
 - `artifact-worker`
   Owns artifact generation, notebook exports, and optional bundle production.
 - `registry`
@@ -38,7 +40,7 @@ The goal is that the same subjects work whether a capability is local to the mon
 
 ## Service Boundaries
 
-### Terminal Service Boundary
+### Terminal-Service Boundary
 
 Owns:
 
@@ -57,7 +59,7 @@ Why:
 
 - This gives modularity without destabilizing the current browser contract.
 
-### Retrieval Worker Boundary
+### Retrieval-Worker Boundary
 
 Owns:
 
@@ -76,7 +78,7 @@ Why:
 
 - This is the cleanest extractable durable-work domain in the codebase.
 
-### Pipeline Runner Boundary
+### Pipeline-Runner Boundary
 
 Owns:
 
@@ -92,6 +94,24 @@ Does not own:
 Why:
 
 - This lets the current HTTP compatibility model coexist with richer internal service composition.
+
+### Automation-Runner Boundary
+
+Owns:
+
+- manual automation run requests in NATS-owned mode
+- due-schedule polling and claiming
+- automation execution lifecycle and event emission
+- automation runtime registration and health reporting
+
+Does not own:
+
+- browser CRUD pages and auth flows for automations/calendar
+- long-lived relational ownership of automation definitions
+
+Why:
+
+- This moves scheduled and operator-triggered runtime work out of the web process without forcing calendar CRUD off the local API/DB path.
 
 ### Registry Boundary
 
@@ -125,15 +145,16 @@ Use when:
 
 - the main goal is to externalize durable work without changing user-facing transport.
 
-### Stage B: Add Terminal And Pipeline Services
+### Stage B: Add Automation, Terminal, And Pipeline Services
 
 Topology:
 
 - web app
 - NATS with JetStream
 - retrieval worker
-- terminal service
-- pipeline runner
+- automation-runner
+- terminal-service
+- pipeline-runner
 
 Use when:
 
@@ -141,7 +162,8 @@ Use when:
 
 Support gate:
 
-- Stage B is only considered supported when the five-service topology can be booted from documented compose commands, each extracted runtime publishes fresh registry records, and retrieval, terminal lifecycle, and pipeline execution paths have live smoke evidence with fallback behavior documented.
+- Stage B is only considered supported when the six-service topology above can be booted from documented compose commands, each extracted runtime publishes fresh registry records, and retrieval, automation, terminal lifecycle, and pipeline execution paths have live smoke evidence with fallback behavior documented.
+- In the current compose smoke, `ollama` is still part of the booted container set because `open-webui` depends on it; that dependency does not change the Stage B service contract.
 - Unit tests that validate compose shape, adapter contracts, and service-owned records are necessary but not sufficient to promote Stage B without the live topology smoke.
 
 ### Stage C: Add Stronger Isolation
@@ -179,8 +201,9 @@ This is intentionally similar to the current tool server and terminal server reg
 The first services to extract should be:
 
 1. `retrieval-worker`
-2. `terminal`
-3. `pipeline-runner`
+2. `automation-runner`
+3. `terminal-service`
+4. `pipeline-runner`
 
 The last service to extract should be:
 
@@ -201,6 +224,7 @@ Slow consumers:
 Duplicate JetStream delivery:
 
 - Make retrieval and artifact jobs idempotent.
+- Make automation and pipeline jobs idempotent wherever replay or retry is possible.
 - Prefer immutable job IDs and explicit completion state in DB.
 
 Unavailable responders:
@@ -218,9 +242,9 @@ Terminal ordering issues:
 - Partition by `session_id`.
 - Do not rely on queue-group randomness for ordered session control.
 
-Worker crash during file processing:
+Worker crash during file processing or automation execution:
 
-- Use durable consumers with explicit ack and bounded retry policy.
+- Use durable consumers with explicit ack and bounded retry policy where durability is required.
 - Ensure final status is reflected in DB even if a progress event is missed.
 
 ## Success Criteria
@@ -230,7 +254,7 @@ The service-first target is successful when:
 - services can join and register capabilities without restart-only discovery
 - the web tier no longer owns all background execution paths
 - browser contracts stay stable through internal service extraction
-- retrieval, pipeline, and terminal service boundaries are clear and enforceable
+- retrieval, automation, pipeline, and terminal service boundaries are clear and enforceable
 - Redis and NATS responsibilities are distinct and not overlapping chaotically
 
 ## Final Position

@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 TERMINAL_SERVICE_RETRY_DELAY = 5.0
 TERMINAL_SESSION_CREATE_SUBJECT = 'owui.cmd.terminal.session.create'
 TERMINAL_SESSION_ATTACH_SUBJECT = 'owui.cmd.terminal.session.attach'
+TERMINAL_CONFIG_REFRESH_SUBJECT = 'owui.cmd.terminal.config.refresh'
 
 
 def should_start_terminal_service(
@@ -133,6 +134,7 @@ class TerminalService:
             self._subscriptions = [
                 await self._nc.subscribe(TERMINAL_SESSION_CREATE_SUBJECT, cb=self._handle_create_request),
                 await self._nc.subscribe(TERMINAL_SESSION_ATTACH_SUBJECT, cb=self._handle_attach_request),
+                await self._nc.subscribe(TERMINAL_CONFIG_REFRESH_SUBJECT, cb=self._handle_config_refresh_request),
                 await self._nc.subscribe(TERMINAL_SESSION_CREATED_SUBJECT, cb=self._handle_session_event_message),
                 await self._nc.subscribe(TERMINAL_SESSION_ATTACHED_SUBJECT, cb=self._handle_session_event_message),
                 await self._nc.subscribe(TERMINAL_SESSION_DISCONNECTED_SUBJECT, cb=self._handle_session_event_message),
@@ -185,6 +187,10 @@ class TerminalService:
 
     async def _handle_attach_request(self, message):
         response = self.handle_control_request('attach', json.loads(message.data.decode('utf-8')))
+        await message.respond(json.dumps(response).encode('utf-8'))
+
+    async def _handle_config_refresh_request(self, message):
+        response = await self.handle_config_refresh_request(json.loads(message.data.decode('utf-8')))
         await message.respond(json.dumps(response).encode('utf-8'))
 
     async def _handle_session_event_message(self, message):
@@ -267,6 +273,27 @@ class TerminalService:
                 'route_source': route_source,
                 'session_status': self._session_registry.get(session_id, {}).get('status') if session_id else None,
                 'lifecycle_source': 'routing_fallback',
+            },
+        }
+
+    async def handle_config_refresh_request(self, payload: dict) -> dict:
+        connections = payload.get('terminal_server_connections')
+        if connections is not None:
+            if not isinstance(connections, list):
+                return _error_response(detail='Invalid terminal config refresh payload', status_code=400)
+            self.app.state.config.TERMINAL_SERVER_CONNECTIONS = connections
+
+        try:
+            terminal_servers = await set_terminal_servers(_build_internal_request(self.app))
+        except Exception:
+            log.exception('Failed to refresh terminal service configuration.')
+            return _error_response(detail='Terminal service config refresh failed')
+
+        return {
+            'status': 'ok',
+            'data': {
+                'terminal_server_count': len(getattr(self.app.state.config, 'TERMINAL_SERVER_CONNECTIONS', []) or []),
+                'cached_terminal_count': len(terminal_servers or []),
             },
         }
 
@@ -446,6 +473,29 @@ async def request_terminal_lifecycle_control(
         return json.loads(response.data.decode('utf-8'))
     except Exception:
         log.exception('Terminal lifecycle control request failed for %s (%s).', server_id, action)
+        return None
+    finally:
+        await nc.drain()
+
+
+async def publish_terminal_config_refresh(app, *, terminal_server_connections: list[dict]) -> dict | None:
+    nats_url = getattr(app.state.config, 'NATS_URL', '')
+    if not nats_url:
+        return None
+
+    nc = await _connect_nats(
+        nats_url,
+        instance_id=getattr(app.state, 'instance_id', None),
+    )
+    try:
+        response = await nc.request(
+            TERMINAL_CONFIG_REFRESH_SUBJECT,
+            json.dumps({'terminal_server_connections': terminal_server_connections}).encode('utf-8'),
+            timeout=TERMINAL_CONTROL_REQUEST_TIMEOUT,
+        )
+        return json.loads(response.data.decode('utf-8'))
+    except Exception:
+        log.exception('Terminal service config refresh request failed.')
         return None
     finally:
         await nc.drain()

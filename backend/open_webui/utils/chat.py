@@ -21,7 +21,11 @@ from open_webui.socket.main import (
     get_event_call,
     get_event_emitter,
 )
-from open_webui.functions import generate_function_chat_completion, request_function_chat_completion_via_runner
+from open_webui.functions import (
+    generate_function_chat_completion,
+    is_durable_pipe_model,
+    request_function_chat_completion_via_runner,
+)
 
 from open_webui.routers.openai import (
     generate_chat_completion as generate_openai_chat_completion,
@@ -277,6 +281,12 @@ async def generate_chat_completion(
                 try:
                     return await request_function_chat_completion_via_runner(request, form_data, user, model)
                 except Exception as e:
+                    if is_durable_pipe_model(model):
+                        log.warning('Durable internal pipe runner failed; direct fallback is disabled: %s', e)
+                        return JSONResponse(
+                            {'error': {'detail': f'Durable pipeline runner unavailable: {e}'}},
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        )
                     log.warning('Falling back to direct internal pipe execution after runner failure: %s', e)
             return await generate_function_chat_completion(request, form_data, user=user, models=models)
         if model.get('owned_by') == 'ollama':

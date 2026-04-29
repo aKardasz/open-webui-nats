@@ -9,6 +9,7 @@ import aiohttp
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, NATS_CONNECT_TIMEOUT, NATS_NAME, NATS_URL
 
 log = logging.getLogger(__name__)
+PIPELINE_STAGE_JOB_STREAM = 'owui_pipeline_jobs'
 PIPELINE_STAGE_JOB_SUBJECT = 'owui.cmd.pipeline.stage.run'
 
 
@@ -244,9 +245,12 @@ class NatsPipelineAdapter:
         )
         try:
             subscription = await nc.subscribe(reply_subject)
+            if hasattr(nc, 'flush'):
+                await nc.flush()
             await nc.jetstream().publish(
                 PIPELINE_STAGE_JOB_SUBJECT,
                 json.dumps(envelope).encode('utf-8'),
+                stream=PIPELINE_STAGE_JOB_STREAM,
             )
             response = await subscription.next_msg(timeout=timeout)
             try:

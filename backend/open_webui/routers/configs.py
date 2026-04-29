@@ -18,6 +18,7 @@ from open_webui.utils.tools import (
     set_terminal_servers,
 )
 from open_webui.utils.runtime_registry import get_runtime_service_records, refresh_runtime_registry
+from open_webui.utils.terminal_service import publish_terminal_config_refresh
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.models.oauth_sessions import OAuthSessions
 
@@ -283,6 +284,10 @@ async def set_terminal_servers_config(
     ]
 
     await set_terminal_servers(request)
+    await publish_terminal_config_refresh(
+        request.app,
+        terminal_server_connections=request.app.state.config.TERMINAL_SERVER_CONNECTIONS,
+    )
 
     return {
         'TERMINAL_SERVER_CONNECTIONS': request.app.state.config.TERMINAL_SERVER_CONNECTIONS,

@@ -19,7 +19,7 @@ Introduce a messaging abstraction and an adjacent NATS deployment without changi
 - Add a small internal messaging layer that can publish Core NATS control messages and optionally JetStream events.
 - Wrap the task stop and control behavior in `backend/open_webui/tasks.py` behind the new abstraction.
 - Define the initial subject namespace using the contracts in `03-target-architecture-and-contracts.md`.
-- Publish non-critical domain events first, such as task stop requested, task stop acknowledged, terminal session created, and retrieval job queued.
+- Publish non-critical domain events first, such as task stop requested, task stop acknowledged, terminal session created, retrieval job queued, and automation run lifecycle events.
 - Keep Redis as the active execution and session coordinator while NATS runs in parallel.
 - Document an adjacent NATS deployment option alongside the current `docker-compose.yaml` shape.
 
@@ -94,8 +94,9 @@ Move the right responsibilities out of the monolith while preserving stable brow
 
 ### Implementation Tasks
 
-- Externalize terminal lifecycle and registration logic into a `terminal` service while keeping browser WebSocket transport at the web edge.
+- Externalize terminal lifecycle and registration logic into a `terminal-service` while keeping browser WebSocket transport at the web edge.
 - Externalize internal pipeline execution into a `pipeline-runner` with Core NATS request/reply for fast internal filters and JetStream for long-running stages.
+- Externalize automation execution into an `automation-runner` that owns manual run requests, due scheduling, and automation execution lifecycle in NATS-owned mode.
 - Introduce KV-backed runtime registry state for service presence, capabilities, and routing hints while preserving admin-configured access control.
 - Optionally introduce an `artifact-worker` for notebook exports or generated bundles.
 
@@ -128,6 +129,7 @@ Start in this order:
 5. terminal lifecycle around `backend/open_webui/routers/terminals.py`
 6. registry evolution in `backend/open_webui/utils/tools.py`
 7. internal pipeline execution in `backend/open_webui/routers/pipelines.py`
+8. automation execution and calendar-aligned runtime behavior in `backend/open_webui/routers/automations.py` and `backend/open_webui/routers/calendar.py`
 
 Delay these until the above are stable:
 
@@ -141,7 +143,7 @@ The first rollback-safe milestone is:
 
 - add NATS alongside Redis
 - route task control through a messaging abstraction
-- publish retrieval and terminal lifecycle events without making correctness depend on them
+- publish retrieval, terminal lifecycle, and automation lifecycle events without making correctness depend on them
 
 This milestone delivers value because it establishes the contract surface and observability needed for later workers without forcing service extraction.
 
@@ -152,6 +154,7 @@ This milestone delivers value because it establishes the contract surface and ob
 - slow consumer on a hot event subject
 - JetStream redelivery after worker crash
 - duplicate execution of a retrieval job
+- duplicate execution or split-brain ownership of an automation run
 - stale registry entry after an unclean worker shutdown
 - partial progress visibility if the UI misses an event but can still read final state from DB
 
